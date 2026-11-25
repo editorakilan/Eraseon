@@ -306,6 +306,7 @@ function setupTools() {
   toolClear.addEventListener('click', () => {
     clearMask();
     hideDetectionBanner();
+    removalModeSelect.value = 'auto';
   });
 
   brushSizeRange.addEventListener('input', (e) => {
@@ -541,6 +542,7 @@ function setupAutoDetect() {
     btnDismissBoxes.addEventListener('click', () => {
       hideDetectionBanner();
       clearMask();
+      removalModeSelect.value = 'auto';
     });
   }
 
@@ -548,6 +550,7 @@ function setupAutoDetect() {
     btnClearDetectedBoxes.addEventListener('click', () => {
       hideDetectionBanner();
       clearMask();
+      removalModeSelect.value = 'auto';
     });
   }
 }

@@ -359,10 +359,10 @@
       let sum = 0;
       const rowOff = (ry + r) * imgW + rx;
       for (let c = 0; c < rw; c++) sum += gray[rowOff + c];
-      if (sum / rw < 48) topH = r + 1;
+      if (sum / rw < 30) topH = r + 1;
       else if (topH > 0) break;
     }
-    if (topH > 5) {
+    if (topH >= 10) {
       boxes.push({
         x: rx,
         y: ry,
@@ -379,10 +379,10 @@
       let sum = 0;
       const rowOff = (ry + r) * imgW + rx;
       for (let c = 0; c < rw; c++) sum += gray[rowOff + c];
-      if (sum / rw < 48) botH = rh - r;
+      if (sum / rw < 30) botH = rh - r;
       else if (botH > 0) break;
     }
-    if (botH > 5) {
+    if (botH >= 10) {
       const yTop = Math.max(ry, ry + rh - botH - 8);
       boxes.push({
         x: rx,
@@ -968,7 +968,9 @@
   }
 
   /**
-   * Multi-scale Push-Pull Harmonic Pyramid Fill strictly from unmasked pixels.
+   * Multi-scale Push-Pull Harmonic Pyramid Fill with Coarse-to-Fine Relaxation.
+   * Relaxes every pyramid scale (levels.length-1 -> 1) so large opaque logos/boxes
+   * never show coarse 8x8/16x16 mosaic blocks.
    */
   function harmonicMaskedFill(srcData, binMask, w, h) {
     const len = w * h;
@@ -989,7 +991,7 @@
 
     const levels = [{ w, h, r: rArr, g: gArr, b: bArr, v: valid }];
     let cur = levels[0];
-    while (cur.w > 2 && cur.h > 2 && levels.length < 7) {
+    while (cur.w > 2 && cur.h > 2 && levels.length < 8) {
       const nw = Math.max(1, Math.ceil(cur.w / 2));
       const nh = Math.max(1, Math.ceil(cur.h / 2));
       const nr = new Float32Array(nw * nh);
@@ -1027,6 +1029,35 @@
       levels.push(cur);
     }
 
+    const relaxLevel = (lv, iters) => {
+      const lw = lv.w, lh = lv.h;
+      const unk = [];
+      for (let i = 0; i < lw * lh; i++) {
+        if (lv.v[i] < 0.999) unk.push(i);
+      }
+      if (!unk.length) return;
+      for (let pass = 0; pass < iters; pass++) {
+        for (let u = 0; u < unk.length; u++) {
+          const i = unk[u];
+          const x = i % lw, y = (i - x) / lw;
+          let sr = 0, sg = 0, sb = 0, sw = 0;
+          if (x > 0) { sr += lv.r[i - 1]; sg += lv.g[i - 1]; sb += lv.b[i - 1]; sw += 1; }
+          if (x + 1 < lw) { sr += lv.r[i + 1]; sg += lv.g[i + 1]; sb += lv.b[i + 1]; sw += 1; }
+          if (y > 0) { sr += lv.r[i - lw]; sg += lv.g[i - lw]; sb += lv.b[i - lw]; sw += 1; }
+          if (y + 1 < lh) { sr += lv.r[i + lw]; sg += lv.g[i + lw]; sb += lv.b[i + lw]; sw += 1; }
+          if (sw > 0) {
+            const keep = lv.v[i] * 0.35;
+            lv.r[i] = keep * lv.r[i] + (1 - keep) * (sr / sw);
+            lv.g[i] = keep * lv.g[i] + (1 - keep) * (sg / sw);
+            lv.b[i] = keep * lv.b[i] + (1 - keep) * (sb / sw);
+          }
+        }
+      }
+    };
+
+    // Relax coarsest level first
+    relaxLevel(levels[levels.length - 1], 16);
+
     for (let lvl = levels.length - 2; lvl >= 0; lvl--) {
       const fine = levels[lvl];
       const coarse = levels[lvl + 1];
@@ -1048,19 +1079,17 @@
           const i00 = y0 * coarse.w + x0, i10 = y0 * coarse.w + x1;
           const i01 = y1 * coarse.w + x0, i11 = y1 * coarse.w + x1;
           const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
-          const norm = w00 * (coarse.v[i00] > 0) + w10 * (coarse.v[i10] > 0) + w01 * (coarse.v[i01] > 0) + w11 * (coarse.v[i11] > 0);
-          if (norm > 1e-5) {
-            const cr = (w00 * (coarse.v[i00] > 0 ? coarse.r[i00] : 0) + w10 * (coarse.v[i10] > 0 ? coarse.r[i10] : 0) + w01 * (coarse.v[i01] > 0 ? coarse.r[i01] : 0) + w11 * (coarse.v[i11] > 0 ? coarse.r[i11] : 0)) / norm;
-            const cg = (w00 * (coarse.v[i00] > 0 ? coarse.g[i00] : 0) + w10 * (coarse.v[i10] > 0 ? coarse.g[i10] : 0) + w01 * (coarse.v[i01] > 0 ? coarse.g[i01] : 0) + w11 * (coarse.v[i11] > 0 ? coarse.g[i11] : 0)) / norm;
-            const cb = (w00 * (coarse.v[i00] > 0 ? coarse.b[i00] : 0) + w10 * (coarse.v[i10] > 0 ? coarse.b[i10] : 0) + w01 * (coarse.v[i01] > 0 ? coarse.b[i01] : 0) + w11 * (coarse.v[i11] > 0 ? coarse.b[i11] : 0)) / norm;
-            const mix = fine.v[fi];
-            fine.r[fi] = mix * fine.r[fi] + (1 - mix) * cr;
-            fine.g[fi] = mix * fine.g[fi] + (1 - mix) * cg;
-            fine.b[fi] = mix * fine.b[fi] + (1 - mix) * cb;
-            fine.v[fi] = 1.0;
-          }
+          const norm = w00 + w10 + w01 + w11;
+          const cr = (w00 * coarse.r[i00] + w10 * coarse.r[i10] + w01 * coarse.r[i01] + w11 * coarse.r[i11]) / norm;
+          const cg = (w00 * coarse.g[i00] + w10 * coarse.g[i10] + w01 * coarse.g[i01] + w11 * coarse.g[i11]) / norm;
+          const cb = (w00 * coarse.b[i00] + w10 * coarse.b[i10] + w01 * coarse.b[i01] + w11 * coarse.b[i11]) / norm;
+          const mix = fine.v[fi];
+          fine.r[fi] = mix * fine.r[fi] + (1 - mix) * cr;
+          fine.g[fi] = mix * fine.g[fi] + (1 - mix) * cg;
+          fine.b[fi] = mix * fine.b[fi] + (1 - mix) * cb;
         }
       }
+      if (lvl > 0) relaxLevel(fine, 18);
     }
 
     return { rArr, gArr, bArr };
@@ -1290,7 +1319,8 @@
       if (hit) overlapPeaks++;
     }
 
-    // Step 2: Project global strip mask and recover uncontaminated local background strictly from outside strips
+    // In manual mode (no auto-detected boxes), strictly respect user's drawn mask
+    const manualMaskOnly = !Array.isArray(boxesHint) || boxesHint.length === 0;
     const globalStripMask = new Uint8Array(w * h);
     for (const pk of peaks) {
       const ix = Math.round(pk.px), iy = Math.round(pk.py);
@@ -1301,7 +1331,7 @@
           const gx = ix + x;
           if (gx < 0 || gx >= w) continue;
           const gIdx = gy * w + gx;
-          if (overlapPeaks <= 1 && !binMask[gIdx]) continue;
+          if ((manualMaskOnly || overlapPeaks <= 1) && !binMask[gIdx]) continue;
           if (stripPatch[y * pw + x]) globalStripMask[gIdx] = 1;
         }
       }
@@ -1412,7 +1442,7 @@
           const gx = ix + x;
           if (gx < 0 || gx >= w) continue;
           const gIdx = gy * w + gx;
-          if (overlapPeaks <= 1 && !binMask[gIdx]) continue;
+          if ((manualMaskOnly || overlapPeaks <= 1) && !binMask[gIdx]) continue;
 
           // Backward-map fractional offset (x - fx, y - fy) inside patch
           const sx = x - fx, sy = y - fy;
@@ -1658,6 +1688,58 @@
     return new ImageData(out, w, h);
   }
 
+  /**
+   * Non-destructive post-removal photographic enhancement:
+   * 1. Gently suppresses 4:2:0 JPEG chroma color noise in Cb/Cr while keeping Y edges crisp.
+   * 2. Thresholded luminance unsharp clarity mask (enhances hair/eyes/foliage without adding sky noise).
+   * 3. Subtle midtone contrast polish (+4%) so the cleaned result looks crisper than the source.
+   */
+  function enhanceCleanedImage(imgData) {
+    const w = imgData.width, h = imgData.height;
+    const data = imgData.data;
+    const len = w * h;
+    const yArr = new Float32Array(len);
+    const cbArr = new Float32Array(len);
+    const crArr = new Float32Array(len);
+
+    for (let i = 0; i < len; i++) {
+      const p = i * 4;
+      const r = data[p], g = data[p + 1], b = data[p + 2];
+      yArr[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+      cbArr[i] = -0.168736 * r - 0.331264 * g + 0.5 * b + 128.0;
+      crArr[i] = 0.5 * r - 0.418688 * g - 0.081312 * b + 128.0;
+    }
+
+    const yBlur = fastBoxBlurFloat(yArr, w, h, 1);
+    const cbSmooth = fastBoxBlurFloat(cbArr, w, h, 1);
+    const crSmooth = fastBoxBlurFloat(crArr, w, h, 1);
+
+    const out = new Uint8ClampedArray(data);
+    for (let i = 0; i < len; i++) {
+      const y = yArr[i];
+      const detail = y - yBlur[i];
+      // Thresholded clarity: sharpen real details (> 2.2) without amplifying smooth sky compression grain
+      const boost = Math.abs(detail) >= 2.2
+        ? Math.max(-16.0, Math.min(16.0, detail * 0.34))
+        : 0.0;
+      // Gentle S-curve micro-contrast around midtones
+      const normY = y / 255.0;
+      const sCurve = (normY - 0.5) * (1.0 - Math.abs(normY - 0.5) * 2.0) * 10.0;
+      const yOut = Math.max(0.0, Math.min(255.0, y + boost + sCurve));
+
+      // Blend 45% smoothed chroma to clean JPEG color artifacts cleanly
+      const cbOut = cbArr[i] * 0.55 + cbSmooth[i] * 0.45;
+      const crOut = crArr[i] * 0.55 + crSmooth[i] * 0.45;
+
+      const p = i * 4;
+      out[p] = clamp255(yOut + 1.402 * (crOut - 128.0));
+      out[p + 1] = clamp255(yOut - 0.344136 * (cbOut - 128.0) - 0.714136 * (crOut - 128.0));
+      out[p + 2] = clamp255(yOut + 1.772 * (cbOut - 128.0));
+      out[p + 3] = 255;
+    }
+    return new ImageData(out, w, h);
+  }
+
   function processImageDataClient(srcImgData, maskImgData, mode = 'auto', colorHint = 'auto', alphaHint = 0.5, boxesHint = null) {
     const w = srcImgData.width;
     const h = srcImgData.height;
@@ -1673,7 +1755,7 @@
     if (maskPixels === 0) return srcImgData;
 
     // Hybrid routing: always clean solid opaque overlays (letterboxes, dark badges, AI corner sparkles)
-    // via harmonic inpainting even when repeating translucent grids are present on the same image.
+    // via relaxed multi-scale harmonic inpainting even when repeating grids exist.
     let workingImg = srcImgData;
     let remainingBinMask = binMask;
     let remainingBoxes = boxesHint;
@@ -1682,7 +1764,7 @@
       const solidBoxes = boxesHint.filter((b) => solidTypes.has(b.type));
       const transBoxes = boxesHint.filter((b) => !solidTypes.has(b.type));
       if (solidBoxes.length > 0 && transBoxes.length === 0 && mode === 'auto') {
-        return clientContentAwareInpaint(srcImgData, binMask, w, h, 14, false);
+        return enhanceCleanedImage(clientContentAwareInpaint(srcImgData, binMask, w, h, 24, false));
       }
       if (solidBoxes.length > 0 && transBoxes.length > 0) {
         const solidMask = new Uint8Array(w * h);
@@ -1696,7 +1778,7 @@
             }
           }
         }
-        workingImg = clientContentAwareInpaint(workingImg, solidMask, w, h, 14, false);
+        workingImg = clientContentAwareInpaint(workingImg, solidMask, w, h, 24, false);
         remainingBinMask = new Uint8Array(w * h);
         for (let i = 0; i < remainingBinMask.length; i++) {
           if (binMask[i] && !solidMask[i]) remainingBinMask[i] = 1;
@@ -1705,21 +1787,21 @@
       }
     }
 
+    let cleaned;
     if (mode === 'deblend') {
-      return clientStrokeDeblend(workingImg, remainingBinMask, w, h, colorHint, alphaHint, remainingBoxes);
+      cleaned = clientStrokeDeblend(workingImg, remainingBinMask, w, h, colorHint, alphaHint, remainingBoxes);
+    } else if (mode === 'inpaint_telea') {
+      cleaned = clientContentAwareInpaint(workingImg, remainingBinMask, w, h, 20, false);
+    } else if (mode === 'inpaint_ns') {
+      cleaned = clientContentAwareInpaint(workingImg, remainingBinMask, w, h, 32, false);
+    } else if (Array.isArray(remainingBoxes) && remainingBoxes.filter((b) => b.type === 'translucent_grid').length >= 3) {
+      // Auto mode ONLY triggers translucent lattice deblend when auto-detect confirmed >=3 repeating grid boxes;
+      // manual logo/brush/box selections always receive crisp full inpainting without mosaic artifacts.
+      cleaned = clientStrokeDeblend(workingImg, remainingBinMask, w, h, colorHint, alphaHint, remainingBoxes);
+    } else {
+      cleaned = clientContentAwareInpaint(workingImg, remainingBinMask, w, h, 24, false);
     }
-    if (mode === 'inpaint_telea') {
-      return clientContentAwareInpaint(workingImg, remainingBinMask, w, h, 10, false);
-    }
-    if (mode === 'inpaint_ns') {
-      return clientContentAwareInpaint(workingImg, remainingBinMask, w, h, 24, false);
-    }
-
-    const { comps } = connectedComponents(remainingBinMask, w, h);
-    if (comps.length >= 3 || (Array.isArray(remainingBoxes) && remainingBoxes.filter((b) => b.type === 'translucent_grid').length >= 3)) {
-      return clientStrokeDeblend(workingImg, remainingBinMask, w, h, colorHint, alphaHint, remainingBoxes);
-    }
-    return clientContentAwareInpaint(workingImg, remainingBinMask, w, h, 14, false);
+    return enhanceCleanedImage(cleaned);
   }
 
   async function uploadClientFile(file) {
