@@ -564,7 +564,7 @@ async function autoDetectOnUpload() {
   try {
     let data;
     if (state.useClientEngine) {
-      const imgData = imageCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
+      const imgData = imgCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
       data = window.EraseonClientEngine.autoDetectClient(imgData, parseFloat(detectSensRange.value), 'all');
     } else {
       const res = await fetch('api/auto-detect', {
@@ -609,7 +609,7 @@ async function runAutoDetect(targetType = 'all') {
   try {
     let data;
     if (state.useClientEngine) {
-      const imgData = imageCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
+      const imgData = imgCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
       data = window.EraseonClientEngine.autoDetectClient(imgData, parseFloat(detectSensRange.value), targetType);
     } else {
       const res = await fetch('api/auto-detect', {
@@ -830,7 +830,7 @@ function setupProcessing() {
 
     try {
       if (state.useClientEngine) {
-        const srcData = imageCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
+        const srcData = imgCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
         const mData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
         const cleaned = window.EraseonClientEngine.processImageDataClient(
           srcData,
