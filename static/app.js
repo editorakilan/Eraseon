@@ -565,7 +565,12 @@ async function autoDetectOnUpload() {
     let data;
     if (state.useClientEngine) {
       const imgData = imgCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
-      data = window.EraseonClientEngine.autoDetectClient(imgData, parseFloat(detectSensRange.value), 'all');
+      data = window.EraseonClientEngine.autoDetectClient(
+        imgData,
+        parseFloat(detectSensRange.value),
+        'all',
+        parseInt(dilateRange.value)
+      );
     } else {
       const res = await fetch('api/auto-detect', {
         method: 'POST',
@@ -610,7 +615,12 @@ async function runAutoDetect(targetType = 'all') {
     let data;
     if (state.useClientEngine) {
       const imgData = imgCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
-      data = window.EraseonClientEngine.autoDetectClient(imgData, parseFloat(detectSensRange.value), targetType);
+      data = window.EraseonClientEngine.autoDetectClient(
+        imgData,
+        parseFloat(detectSensRange.value),
+        targetType,
+        parseInt(dilateRange.value)
+      );
     } else {
       const res = await fetch('api/auto-detect', {
         method: 'POST',
@@ -836,7 +846,8 @@ function setupProcessing() {
           srcData,
           mData,
           removalModeSelect.value,
-          colorHintSelect.value
+          colorHintSelect.value,
+          parseFloat(opacityRange.value)
         );
         const outCanvas = document.createElement('canvas');
         outCanvas.width = cleaned.width;
@@ -913,7 +924,8 @@ function setupProcessing() {
           templateMask,
           Object.keys(pageMasksPayload).length ? pageMasksPayload : null,
           removalModeSelect.value,
-          colorHintSelect.value
+          colorHintSelect.value,
+          parseFloat(opacityRange.value)
         );
         if (state.cleanedPdfBlobUrl) URL.revokeObjectURL(state.cleanedPdfBlobUrl);
         state.cleanedPdfBlobUrl = URL.createObjectURL(pdfBlob);
