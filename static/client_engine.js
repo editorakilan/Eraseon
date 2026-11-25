@@ -534,7 +534,6 @@
     const padY = Math.floor(psh * 0.32);
     const stride = 2;
     const coarseCands = [];
-
     for (let py = -padY; py <= ph - psh + padY; py += stride) {
       for (let px = -padX; px <= pw - psw + padX; px += stride) {
         let dot = 0, normI = 0, validCnt = 0;
@@ -548,9 +547,10 @@
           validCnt++;
         }
         if (validCnt < sparsePts.length * 0.45 || normI < 1e-3) continue;
-        const ncc = dot / (Math.sqrt(normI) * sparseNorm);
-        if (ncc >= minNcc * 0.80) {
-          coarseCands.push({ px: px / proxyScale, py: py / proxyScale, ncc });
+        const signedNcc = dot / (Math.sqrt(normI) * sparseNorm);
+        // Same-polarity initial coarse search avoids false inverted-edge matches on portraits/clouds
+        if (signedNcc >= minNcc * 0.80) {
+          coarseCands.push({ px: px / proxyScale, py: py / proxyScale, ncc: signedNcc, signedNcc });
         }
       }
     }
@@ -598,8 +598,9 @@
         normI += iv * iv;
         validCnt++;
       }
-      if (validCnt < fullPts.length * minFrac || normI < 1e-3) return -1;
-      return dot / (Math.sqrt(normI) * normFull);
+      if (validCnt < fullPts.length * minFrac || normI < 1e-3) return { abs: -1, signed: -1 };
+      const signed = dot / (Math.sqrt(normI) * normFull);
+      return { abs: Math.abs(signed), signed };
     };
 
     for (const cand of coarseCands) {
@@ -610,8 +611,8 @@
       }
       if (tooClose) continue;
 
-      // 1px integer scan around coarse location
-      let bestX = Math.round(cand.px), bestY = Math.round(cand.py), bestNcc = -1;
+      // 1px integer scan around coarse location (same-sign polarity for reliable initial peaks)
+      let bestX = Math.round(cand.px), bestY = Math.round(cand.py), bestNcc = -1, bestSigned = 0;
       for (let ry = bestY - searchR; ry <= bestY + searchR; ry++) {
         for (let rx = bestX - searchR; rx <= bestX + searchR; rx++) {
           let dot = 0, normI = 0, validCnt = 0;
@@ -625,21 +626,22 @@
             validCnt++;
           }
           if (validCnt < fullPts.length * 0.45 || normI < 1e-3) continue;
-          const ncc = dot / (Math.sqrt(normI) * normFull);
-          if (ncc > bestNcc) { bestNcc = ncc; bestX = rx; bestY = ry; }
+          const signed = dot / (Math.sqrt(normI) * normFull);
+          if (signed > bestNcc) { bestNcc = signed; bestSigned = signed; bestX = rx; bestY = ry; }
         }
       }
 
       if (bestNcc < minNcc) continue;
 
       // 0.25px sub-pixel refinement around best integer peak
-      let subX = bestX, subY = bestY, subNcc = bestNcc;
+      let subX = bestX, subY = bestY, subNcc = bestNcc, subSigned = bestSigned;
       for (let dy = -0.5; dy <= 0.501; dy += 0.25) {
         for (let dx = -0.5; dx <= 0.501; dx += 0.25) {
           if (dx === 0 && dy === 0) continue;
-          const ncc = evalNccBilinear(bestX + dx, bestY + dy);
-          if (ncc > subNcc) {
-            subNcc = ncc;
+          const r = evalNccBilinear(bestX + dx, bestY + dy);
+          if (r.signed > subNcc) {
+            subNcc = r.signed;
+            subSigned = r.signed;
             subX = bestX + dx;
             subY = bestY + dy;
           }
@@ -653,7 +655,7 @@
         if (dx * dx + dy * dy < nmsDistSq) { dup = true; break; }
       }
       if (!dup) {
-        peaks.push({ px: subX, py: subY, ncc: subNcc, sw, sh });
+        peaks.push({ px: subX, py: subY, ncc: subNcc, signedNcc: subSigned, sw, sh });
       }
       if (peaks.length >= 48) break;
     }
@@ -737,12 +739,12 @@
             for (let n = Math.floor(nMin); n <= Math.ceil(nMax); n++) {
               const gx = p0.px + m * v1.dx + n * v2.dx;
               const gy = p0.py + m * v1.dy + n * v2.dy;
-              if (gx < -sw * 0.85 || gx > w - sw * 0.15 || gy < -sh * 0.85 || gy > h - sh * 0.15) continue;
+              if (gx < -sw * 0.65 || gx > w - sw * 0.35 || gy < -sh * 0.65 || gy > h - sh * 0.35) continue;
               const already = peaks.some((pk) => Math.hypot(pk.px - gx, pk.py - gy) < Math.max(12, Math.min(sw, sh) * 0.35));
               if (already) continue;
-              const ncc = evalNccBilinear(gx, gy, 0.15);
-              if (ncc >= 0.16) {
-                peaks.push({ px: gx, py: gy, ncc, sw, sh });
+              const rNcc = evalNccBilinear(gx, gy, 0.20);
+              if (rNcc.abs >= 0.09) {
+                peaks.push({ px: gx, py: gy, ncc: rNcc.abs, signedNcc: rNcc.signed, sw, sh });
                 if (peaks.length >= 48) break;
               }
             }
@@ -1235,7 +1237,8 @@
     const mattePeaks = peaks.filter((pk) => pk.ncc >= 0.36);
     const learnPeaks = mattePeaks.length >= 3 ? mattePeaks : peaks;
 
-    // Step 1: Align bilinear high-pass patches at exact sub-pixel peak coordinates
+    // Step 1: Align polarity-normalized high-pass patches at exact sub-pixel coordinates
+    // (Multiplying by sign ensures mid-gray stock logos combine constructively across light & dark backgrounds!)
     const medHp = new Float32Array(patchLen);
     const hpSamples = new Float32Array(learnPeaks.length);
     for (let i = 0; i < patchLen; i++) {
@@ -1243,11 +1246,13 @@
       const ly = (i - lx) / pw;
       let k = 0;
       for (let pIdx = 0; pIdx < learnPeaks.length; pIdx++) {
-        const gx = learnPeaks[pIdx].px + lx;
-        const gy = learnPeaks[pIdx].py + ly;
+        const pk = learnPeaks[pIdx];
+        const gx = pk.px + lx;
+        const gy = pk.py + ly;
         if (gx < 0 || gx > w - 1 || gy < 0 || gy > h - 1) continue;
         const val = sampleBilinearFloat(hpY, w, h, gx, gy);
-        hpSamples[k++] = isLight ? val : -val;
+        const sgn = (pk.signedNcc !== undefined && pk.signedNcc < 0) ? -1 : 1;
+        hpSamples[k++] = (isLight ? val : -val) * sgn;
       }
       if (k >= 2) {
         const sub = hpSamples.subarray(0, k).slice().sort();
@@ -1304,7 +1309,45 @@
 
     const cleanBg = harmonicMaskedFill(src, globalStripMask, w, h);
 
-    // Step 3: Compute signed Y alpha [-0.045, 0.50] AND chroma alpha_C [0, 0.45] across clean peaks only
+    // Step 2b: Estimate exact watermark color W_est dynamically via linear regression:
+    //   I - B = alpha * (W - B) = alpha*W - alpha*B
+    // Accurately distinguishes pure white (W~255), black (W~0), and mid-gray stock watermarks (iStock W~165)!
+    let effTargetY = wmTargetY;
+    if (!colorHint || colorHint === 'auto') {
+      let sumB = 0, sumD = 0, sumBB = 0, sumBD = 0, regN = 0;
+      for (let i = 0; i < patchLen; i++) {
+        if (!rawStroke[i]) continue;
+        const lx = i % pw;
+        const ly = (i - lx) / pw;
+        for (let pIdx = 0; pIdx < learnPeaks.length; pIdx++) {
+          const gx = learnPeaks[pIdx].px + lx;
+          const gy = learnPeaks[pIdx].py + ly;
+          if (gx < 0 || gx > w - 1 || gy < 0 || gy > h - 1) continue;
+          const [sr, sg, sb] = sampleBilinearRGB(src, w, h, gx, gy);
+          const br = sampleBilinearFloat(cleanBg.rArr, w, h, gx, gy);
+          const bg = sampleBilinearFloat(cleanBg.gArr, w, h, gx, gy);
+          const bb = sampleBilinearFloat(cleanBg.bArr, w, h, gx, gy);
+          const yT = 0.299 * sr + 0.587 * sg + 0.114 * sb;
+          const yB = 0.299 * br + 0.587 * bg + 0.114 * bb;
+          const d = yT - yB;
+          sumB += yB; sumD += d; sumBB += yB * yB; sumBD += yB * d; regN++;
+        }
+      }
+      if (regN >= 40) {
+        const meanB = sumB / regN;
+        const meanD = sumD / regN;
+        const varB = (sumBB / regN) - meanB * meanB;
+        const covBD = (sumBD / regN) - meanB * meanD;
+        if (varB > 180.0) {
+          const slopeAlpha = -covBD / varB;
+          if (slopeAlpha >= 0.08 && slopeAlpha <= 0.72) {
+            effTargetY = Math.max(0.0, Math.min(255.0, meanB + meanD / slopeAlpha));
+          }
+        }
+      }
+    }
+
+    // Step 3: Compute signed Y alpha [-0.045, 0.52] AND chroma alpha_C [0, 0.45] across clean peaks
     const alphaY = new Float32Array(patchLen);
     const alphaC = new Float32Array(patchLen);
     const ySamples = new Float32Array(learnPeaks.length);
@@ -1327,9 +1370,10 @@
 
         const yT = 0.299 * sr + 0.587 * sg + 0.114 * sb;
         const yB = 0.299 * br + 0.587 * bg + 0.114 * bb;
-        const dy = isLight ? (yT - yB) : (yB - yT);
-        const denomY = isLight ? Math.max(35.0, wmTargetY - yB) : Math.max(35.0, yB - wmTargetY);
-        ySamples[ky++] = Math.max(-0.05, Math.min(0.50, dy / denomY));
+        const diffW = effTargetY - yB;
+        if (Math.abs(diffW) >= 22.0) {
+          ySamples[ky++] = Math.max(-0.05, Math.min(0.55, (yT - yB) / diffW));
+        }
 
         const cbT = -0.168736 * sr - 0.331264 * sg + 0.5 * sb + 128.0;
         const cbB = -0.168736 * br - 0.331264 * bg + 0.5 * bb + 128.0;
@@ -1345,7 +1389,7 @@
       if (ky >= 2) {
         const subY = ySamples.subarray(0, ky).slice().sort();
         const rawMed = subY[Math.floor(ky * 0.5)];
-        const ay = rawMed > 0 ? Math.min(0.49, rawMed * 1.05) : Math.max(-0.045, rawMed);
+        const ay = rawMed > 0 ? Math.min(0.54, rawMed * 1.05) : Math.max(-0.045, rawMed);
         alphaY[i] = Math.abs(ay) >= 0.009 ? ay : 0.0;
       }
       if (kc >= 2) {
@@ -1395,9 +1439,19 @@
       const cb = -0.168736 * r - 0.331264 * g + 0.5 * b + 128.0;
       const cr = 0.5 * r - 0.418688 * g - 0.081312 * b + 128.0;
 
-      const yRec = (yVal - ay * wmTargetY) / Math.max(0.45, 1.0 - ay);
-      const cbRec = (cb - ac * 128.0) / Math.max(0.45, 1.0 - ac);
-      const crRec = (cr - ac * 128.0) / Math.max(0.45, 1.0 - ac);
+      const inv = Math.max(0.45, 1.0 - ay);
+      const yRawRec = (yVal - ay * effTargetY) / inv;
+      const cleanB = rgbToY(cleanBg.rArr[i], cleanBg.gArr[i], cleanBg.bArr[i]);
+      // Prevent black-crush burns over dark hair/eyes/cameras on mid-gray stock logos while preserving natural contrast
+      const yRec = (ay > 0 && effTargetY > cleanB && yRawRec < cleanB * 0.68)
+        ? Math.max(0.0, cleanB * 0.68)
+        : yRawRec;
+
+      // Correct YCbCr chroma inversion centered strictly at 128 (prevents green/red color cast)
+      const lumFactor = yRec < yVal ? Math.max(0.45, (yRec + 18.0) / (yVal + 18.0)) : 1.0;
+      const cInv = Math.max(0.65, 1.0 - ac * 0.65);
+      const cbRec = 128.0 + ((cb - 128.0) / cInv) * lumFactor;
+      const crRec = 128.0 + ((cr - 128.0) / cInv) * lumFactor;
 
       out[p] = clamp255(yRec + 1.402 * (crRec - 128.0));
       out[p + 1] = clamp255(yRec - 0.344136 * (cbRec - 128.0) - 0.714136 * (crRec - 128.0));
@@ -1447,10 +1501,10 @@
       const ay = globalAY[i];
       if (ay === 0) continue;
       const hpStd = Math.sqrt(Math.max(0, lapVar[i]));
-      if (hpStd < 2.2 && Math.abs(ay) >= 0.014) {
+      if (hpStd < 1.85 && Math.abs(ay) >= 0.012) {
         smoothHole[i] = 1;
         hasSmooth = true;
-      } else if (ay > 0.14 && hpStd >= 2.2) {
+      } else if (ay > 0.14 && hpStd >= 1.85) {
         const p = i * 4;
         const d = Math.max(
           Math.abs(out[p] - med3[p]),
