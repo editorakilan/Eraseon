@@ -1,9 +1,10 @@
 /**
- * Eraseon - Pure Browser Client-Side Engine
+ * Eraseon - Pure Browser Client-Side Engine (High-Fidelity Edition)
  * Runs 100% serverless on GitHub Pages (images & multi-page PDFs) with:
- * - Multi-scale Top-Hat / Black-Hat + PCA oriented polygon + repeating NCC template detection
- * - Dekel-style Multi-Instance Aligned Median Matte Recovery in YCbCr (zero blur on faces/hair/clouds)
- * - Multi-scale Push-Pull Harmonic Pyramid + Relaxation + Sensor-Grain inpainting for opaque logos/sparkles
+ * - Resolution-adaptive Top-Hat / Black-Hat + PCA oriented polygon + NCC template matching
+ * - Sub-pixel (0.25px) Dekel-style Multi-Instance Median Matte Recovery in YCbCr
+ *   including negative-alpha JPEG ringing cancellation & independent Cb/Cr recovery
+ * - Multi-scale Push-Pull Harmonic Pyramid + Border-Guided Exemplar Patch Synthesis + Sensor-Grain
  */
 (function (global) {
   const PDFJS_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js';
@@ -83,6 +84,45 @@
       }
     }
     return dst;
+  }
+
+  function sampleBilinearFloat(arr, w, h, x, y) {
+    const cx = Math.max(0, Math.min(w - 1.0001, x));
+    const cy = Math.max(0, Math.min(h - 1.0001, y));
+    const x0 = Math.floor(cx), y0 = Math.floor(cy);
+    const x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1);
+    const fx = cx - x0, fy = cy - y0;
+    const v00 = arr[y0 * w + x0], v10 = arr[y0 * w + x1];
+    const v01 = arr[y1 * w + x0], v11 = arr[y1 * w + x1];
+    return (v00 * (1 - fx) + v10 * fx) * (1 - fy) + (v01 * (1 - fx) + v11 * fx) * fy;
+  }
+
+  function sampleBilinearRGB(data, w, h, x, y) {
+    const cx = Math.max(0, Math.min(w - 1.0001, x));
+    const cy = Math.max(0, Math.min(h - 1.0001, y));
+    const x0 = Math.floor(cx), y0 = Math.floor(cy);
+    const x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1);
+    const fx = cx - x0, fy = cy - y0;
+    const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+    const i00 = (y0 * w + x0) * 4, i10 = (y0 * w + x1) * 4;
+    const i01 = (y1 * w + x0) * 4, i11 = (y1 * w + x1) * 4;
+    return [
+      data[i00] * w00 + data[i10] * w10 + data[i01] * w01 + data[i11] * w11,
+      data[i00 + 1] * w00 + data[i10 + 1] * w10 + data[i01 + 1] * w01 + data[i11 + 1] * w11,
+      data[i00 + 2] * w00 + data[i10 + 2] * w10 + data[i01 + 2] * w01 + data[i11 + 2] * w11
+    ];
+  }
+
+  function resizeGrayBilinear(gray, sw, sh, dw, dh) {
+    const out = new Float32Array(dw * dh);
+    const sx = sw / dw, sy = sh / dh;
+    for (let y = 0; y < dh; y++) {
+      const gy = (y + 0.5) * sy - 0.5;
+      for (let x = 0; x < dw; x++) {
+        out[y * dw + x] = sampleBilinearFloat(gray, sw, sh, (x + 0.5) * sx - 0.5, gy);
+      }
+    }
+    return out;
   }
 
   function morphExtremaGray(src, w, h, radius, isMax) {
@@ -260,18 +300,21 @@
     sampleVals.sort((a, b) => a - b);
     if ((sampleVals[Math.floor(sampleVals.length / 2)] || 0) > 235) return boxes;
 
-    const blur = fastBoxBlurFloat(subGray, cw, ch, 14);
+    const scaleR = Math.max(10, Math.round(Math.min(rw, rh) * 0.03));
+    const blur = fastBoxBlurFloat(subGray, cw, ch, scaleR);
     const thThresh = Math.max(16, 28 - sensitivity * 12);
     const bin = new Uint8Array(cw * ch);
     for (let i = 0; i < bin.length; i++) {
       if (subGray[i] - blur[i] >= thThresh) bin[i] = 1;
     }
 
+    const minSize = Math.max(10, Math.round(Math.min(rw, rh) * 0.025));
+    const maxSize = Math.max(60, Math.round(Math.min(rw, rh) * 0.14));
     const { comps } = connectedComponents(bin, cw, ch);
     const pad = Math.max(4, dilatePx);
     for (const c of comps) {
       const aspect = c.width / Math.max(1, c.height);
-      if (c.width >= 10 && c.width <= 60 && c.height >= 10 && c.height <= 60 && aspect >= 0.68 && aspect <= 1.45 && c.area >= 30 && c.area <= 2000) {
+      if (c.width >= minSize && c.width <= maxSize && c.height >= minSize && c.height <= maxSize && aspect >= 0.68 && aspect <= 1.45 && c.area >= 30) {
         let colorDiff = 0;
         let cnt = 0;
         for (let yy = c.y; yy < c.y + c.height; yy++) {
@@ -373,7 +416,6 @@
       Math.max(0, Math.min(imgH - 1, Math.round(my + u * uy + v * vy)))
     ];
     return {
-      angleRad,
       angleDeg,
       lengthU: maxU - minU,
       heightV: maxV - minV,
@@ -387,82 +429,127 @@
   }
 
   /**
-   * Computes normalized cross-correlation (NCC) template matches across the full image
-   * using a high-pass luminance template from the cleanest seed candidate box,
-   * finding ALL repeating copies (even over face, hair, eyes, or clothing!).
+   * Fast coarse-to-fine NCC template matcher + 0.25px quadratic/grid sub-pixel refinement.
+   * Automatically scales search to <= 640px proxy so high-res photos & PDFs run in <80ms,
+   * then refines exact sub-pixel coordinates at full image resolution.
    */
-  function findRepeatingTemplatePeaks(hpGray, w, h, seedBox, minNcc = 0.40) {
+  function findRepeatingTemplatePeaks(hpGray, w, h, seedBox, minNcc = 0.36) {
     const sx0 = Math.max(0, Math.floor(seedBox.x));
     const sy0 = Math.max(0, Math.floor(seedBox.y));
     const sw = Math.min(w - sx0, Math.floor(seedBox.width));
     const sh = Math.min(h - sy0, Math.floor(seedBox.height));
     if (sw < 16 || sh < 16) return [];
 
-    // Sample active high-pass template points inside seed polygon/bbox
-    const activePts = [];
-    let meanT = 0;
-    const threshT = 4.0;
-    for (let y = 0; y < sh; y++) {
-      const off = (sy0 + y) * w + sx0;
-      for (let x = 0; x < sw; x++) {
-        const val = hpGray[off + x];
-        if (Math.abs(val) >= threshT) {
-          activePts.push([x, y, val]);
-          meanT += val;
+    // Downscale proxy if large (> 720px) for fast coarse peak search
+    const proxyScale = Math.min(1.0, 680.0 / Math.max(w, h));
+    const pw = Math.max(32, Math.round(w * proxyScale));
+    const ph = Math.max(32, Math.round(h * proxyScale));
+    const pHp = proxyScale < 0.98 ? resizeGrayBilinear(hpGray, w, h, pw, ph) : hpGray;
+
+    const psx = Math.floor(sx0 * proxyScale);
+    const psy = Math.floor(sy0 * proxyScale);
+    const psw = Math.max(12, Math.round(sw * proxyScale));
+    const psh = Math.max(12, Math.round(sh * proxyScale));
+
+    const pActive = [];
+    let meanP = 0;
+    for (let y = 0; y < psh; y++) {
+      const off = (psy + y) * pw + psx;
+      for (let x = 0; x < psw; x++) {
+        const val = pHp[off + x];
+        if (Math.abs(val) >= 3.5) {
+          pActive.push([x, y, val]);
+          meanP += val;
         }
       }
     }
-    if (activePts.length < 30) return [];
-    meanT /= activePts.length;
-    let normT = 0;
-    for (let i = 0; i < activePts.length; i++) {
-      activePts[i][2] -= meanT;
-      normT += activePts[i][2] * activePts[i][2];
-    }
-    normT = Math.sqrt(normT);
-    if (normT < 1e-4) return [];
+    if (pActive.length < 25) return [];
+    meanP /= pActive.length;
+    for (let i = 0; i < pActive.length; i++) pActive[i][2] -= meanP;
 
-    // Subsample template points for fast coarse 2px scan (~200-400 points)
-    const stepPt = Math.max(1, Math.floor(activePts.length / 260));
+    const stepPt = Math.max(1, Math.floor(pActive.length / 220));
     const sparsePts = [];
     let sparseNorm = 0;
-    for (let i = 0; i < activePts.length; i += stepPt) {
-      sparsePts.push(activePts[i]);
-      sparseNorm += activePts[i][2] * activePts[i][2];
+    for (let i = 0; i < pActive.length; i += stepPt) {
+      sparsePts.push(pActive[i]);
+      sparseNorm += pActive[i][2] * pActive[i][2];
     }
     sparseNorm = Math.sqrt(sparseNorm);
+    if (sparseNorm < 1e-4) return [];
 
-    // Allow partial border-cropped placements up to 30% outside edges
-    const padX = Math.floor(sw * 0.30);
-    const padY = Math.floor(sh * 0.30);
+    const padX = Math.floor(psw * 0.32);
+    const padY = Math.floor(psh * 0.32);
     const stride = 2;
-    const candidates = [];
+    const coarseCands = [];
 
-    for (let py = -padY; py <= h - sh + padY; py += stride) {
-      for (let px = -padX; px <= w - sw + padX; px += stride) {
+    for (let py = -padY; py <= ph - psh + padY; py += stride) {
+      for (let px = -padX; px <= pw - psw + padX; px += stride) {
         let dot = 0, normI = 0, validCnt = 0;
         for (let k = 0; k < sparsePts.length; k++) {
           const [tx, ty, tv] = sparsePts[k];
           const gx = px + tx, gy = py + ty;
-          if (gx < 0 || gx >= w || gy < 0 || gy >= h) continue;
-          const iv = hpGray[gy * w + gx];
+          if (gx < 0 || gx >= pw || gy < 0 || gy >= ph) continue;
+          const iv = pHp[gy * pw + gx];
           dot += iv * tv;
           normI += iv * iv;
           validCnt++;
         }
         if (validCnt < sparsePts.length * 0.45 || normI < 1e-3) continue;
         const ncc = dot / (Math.sqrt(normI) * sparseNorm);
-        if (ncc >= minNcc * 0.85) {
-          candidates.push({ px, py, ncc });
+        if (ncc >= minNcc * 0.80) {
+          coarseCands.push({ px: px / proxyScale, py: py / proxyScale, ncc });
         }
       }
     }
 
-    // Non-maximum suppression + exact 1px full-point refinement
-    candidates.sort((a, b) => b.ncc - a.ncc);
+    // Build full-res refinement points preserving fine 1px strokes
+    const fullPts = [];
+    let fullMean = 0;
+    const fullStep = Math.max(1, Math.floor(Math.sqrt((sw * sh) / 6000)));
+    for (let y = 0; y < sh; y += fullStep) {
+      const off = (sy0 + y) * w + sx0;
+      for (let x = 0; x < sw; x += fullStep) {
+        const val = hpGray[off + x];
+        if (Math.abs(val) >= 4.0) {
+          fullPts.push([x, y, val]);
+          fullMean += val;
+        }
+      }
+    }
+    if (fullPts.length < 30) return [];
+    fullMean /= fullPts.length;
+    let normFull = 0;
+    for (let i = 0; i < fullPts.length; i++) {
+      fullPts[i][2] -= fullMean;
+      normFull += fullPts[i][2] * fullPts[i][2];
+    }
+    normFull = Math.sqrt(normFull);
+    if (normFull < 1e-4) return [];
+
+    coarseCands.sort((a, b) => b.ncc - a.ncc);
     const peaks = [];
     const nmsDistSq = Math.pow(Math.max(18, Math.min(sw, sh) * 0.55), 2);
-    for (const cand of candidates) {
+    const searchR = Math.max(3, Math.ceil(2.5 / proxyScale));
+
+    // Subsample refinement points only during initial integer sweep if very large
+    const fastRefStep = Math.max(1, Math.floor(fullPts.length / 450));
+
+    const evalNccBilinear = (rx, ry) => {
+      let dot = 0, normI = 0, validCnt = 0;
+      for (let k = 0; k < fullPts.length; k++) {
+        const [tx, ty, tv] = fullPts[k];
+        const gx = rx + tx, gy = ry + ty;
+        if (gx < 0 || gx > w - 1 || gy < 0 || gy > h - 1) continue;
+        const iv = sampleBilinearFloat(hpGray, w, h, gx, gy);
+        dot += iv * tv;
+        normI += iv * iv;
+        validCnt++;
+      }
+      if (validCnt < fullPts.length * 0.45 || normI < 1e-3) return -1;
+      return dot / (Math.sqrt(normI) * normFull);
+    };
+
+    for (const cand of coarseCands) {
       let tooClose = false;
       for (const pk of peaks) {
         const dx = cand.px - pk.px, dy = cand.py - pk.py;
@@ -470,13 +557,13 @@
       }
       if (tooClose) continue;
 
-      // Exact 1px refinement around coarse peak
-      let bestX = cand.px, bestY = cand.py, bestNcc = -1;
-      for (let ry = cand.py - 2; ry <= cand.py + 2; ry++) {
-        for (let rx = cand.px - 2; rx <= cand.px + 2; rx++) {
+      // 1px integer scan around coarse location
+      let bestX = Math.round(cand.px), bestY = Math.round(cand.py), bestNcc = -1;
+      for (let ry = bestY - searchR; ry <= bestY + searchR; ry++) {
+        for (let rx = bestX - searchR; rx <= bestX + searchR; rx++) {
           let dot = 0, normI = 0, validCnt = 0;
-          for (let k = 0; k < activePts.length; k++) {
-            const [tx, ty, tv] = activePts[k];
+          for (let k = 0; k < fullPts.length; k++) {
+            const [tx, ty, tv] = fullPts[k];
             const gx = rx + tx, gy = ry + ty;
             if (gx < 0 || gx >= w || gy < 0 || gy >= h) continue;
             const iv = hpGray[gy * w + gx];
@@ -484,66 +571,170 @@
             normI += iv * iv;
             validCnt++;
           }
-          if (validCnt < activePts.length * 0.45 || normI < 1e-3) continue;
-          const ncc = dot / (Math.sqrt(normI) * normT);
-          if (ncc > bestNcc) {
-            bestNcc = ncc; bestX = rx; bestY = ry;
+          if (validCnt < fullPts.length * 0.45 || normI < 1e-3) continue;
+          const ncc = dot / (Math.sqrt(normI) * normFull);
+          if (ncc > bestNcc) { bestNcc = ncc; bestX = rx; bestY = ry; }
+        }
+      }
+
+      if (bestNcc < minNcc) continue;
+
+      // 0.25px sub-pixel refinement around best integer peak
+      let subX = bestX, subY = bestY, subNcc = bestNcc;
+      for (let dy = -0.5; dy <= 0.501; dy += 0.25) {
+        for (let dx = -0.5; dx <= 0.501; dx += 0.25) {
+          if (dx === 0 && dy === 0) continue;
+          const ncc = evalNccBilinear(bestX + dx, bestY + dy);
+          if (ncc > subNcc) {
+            subNcc = ncc;
+            subX = bestX + dx;
+            subY = bestY + dy;
           }
         }
       }
-      if (bestNcc >= minNcc) {
-        peaks.push({ px: bestX, py: bestY, ncc: bestNcc, sw, sh });
+
+      // Re-check NMS after sub-pixel refinement
+      let dup = false;
+      for (const pk of peaks) {
+        const dx = subX - pk.px, dy = subY - pk.py;
+        if (dx * dx + dy * dy < nmsDistSq) { dup = true; break; }
+      }
+      if (!dup) {
+        peaks.push({ px: subX, py: subY, ncc: subNcc, sw, sh });
       }
       if (peaks.length >= 48) break;
+    }
+
+    // Complete missing regular 2D lattice slots (e.g. partial border or cluttered-bg copies)
+    if (peaks.length >= 4) {
+      const diffs = [];
+      for (let i = 0; i < peaks.length; i++) {
+        for (let j = i + 1; j < peaks.length; j++) {
+          let dx = peaks[j].px - peaks[i].px;
+          let dy = peaks[j].py - peaks[i].py;
+          if (dx < 0 || (dx === 0 && dy < 0)) { dx = -dx; dy = -dy; }
+          const len = Math.hypot(dx, dy);
+          if (len >= Math.max(sw, sh) * 0.45) diffs.push({ dx, dy, len });
+        }
+      }
+      diffs.sort((a, b) => a.len - b.len);
+
+      // Deduplicate candidate basis vectors by clustering within 6px
+      const basisCands = [];
+      for (const d of diffs) {
+        if (!basisCands.some((b) => Math.hypot(b.dx - d.dx, b.dy - d.dy) < 6.0)) {
+          basisCands.push(d);
+          if (basisCands.length >= 12) break;
+        }
+      }
+
+      let bestLattice = null;
+      let bestScore = -1;
+      for (let a = 0; a < basisCands.length; a++) {
+        for (let b = a + 1; b < basisCands.length; b++) {
+          const v1 = basisCands[a], v2 = basisCands[b];
+          const det = v1.dx * v2.dy - v1.dy * v2.dx;
+          if (Math.abs(det) < 0.25 * v1.len * v2.len) continue;
+          const p0 = peaks[0];
+          let inliers = 0, errSum = 0;
+          const matchedUV = [];
+          for (const pk of peaks) {
+            const rx = pk.px - p0.px, ry = pk.py - p0.py;
+            const u = (rx * v2.dy - ry * v2.dx) / det;
+            const v = (v1.dx * ry - v1.dy * rx) / det;
+            const mu = Math.round(u), nv = Math.round(v);
+            const ex = p0.px + mu * v1.dx + nv * v2.dx - pk.px;
+            const ey = p0.py + mu * v1.dy + nv * v2.dy - pk.py;
+            const dist = Math.hypot(ex, ey);
+            if (dist < 4.5) {
+              inliers++;
+              errSum += dist;
+              matchedUV.push([mu, nv, pk.px, pk.py]);
+            }
+          }
+          const score = inliers * 10.0 - errSum - (v1.len + v2.len) * 0.005;
+          if (inliers >= 4 && score > bestScore) {
+            bestScore = score;
+            bestLattice = { v1, v2, p0, det, matchedUV };
+          }
+        }
+      }
+
+      if (bestLattice) {
+        const { v1, v2, p0, det } = bestLattice;
+        const corners = [[-sw, -sh], [w + sw, -sh], [-sw, h + sh], [w + sw, h + sh]];
+        let mMin = 1e9, mMax = -1e9, nMin = 1e9, nMax = -1e9;
+        for (const [cx, cy] of corners) {
+          const rx = cx - p0.px, ry = cy - p0.py;
+          const u = (rx * v2.dy - ry * v2.dx) / det;
+          const v = (v1.dx * ry - v1.dy * rx) / det;
+          if (u < mMin) mMin = u; if (u > mMax) mMax = u;
+          if (v < nMin) nMin = v; if (v > nMax) nMax = v;
+        }
+        for (let m = Math.floor(mMin); m <= Math.ceil(mMax); m++) {
+          for (let n = Math.floor(nMin); n <= Math.ceil(nMax); n++) {
+            const gx = p0.px + m * v1.dx + n * v2.dx;
+            const gy = p0.py + m * v1.dy + n * v2.dy;
+            if (gx < -sw * 0.38 || gx > w - sw * 0.62 || gy < -sh * 0.38 || gy > h - sh * 0.62) continue;
+            const already = peaks.some((pk) => Math.hypot(pk.px - gx, pk.py - gy) < Math.max(12, Math.min(sw, sh) * 0.35));
+            if (already) continue;
+            const ncc = evalNccBilinear(gx, gy);
+            if (ncc >= 0.14) {
+              peaks.push({ px: gx, py: gy, ncc, sw, sh });
+            }
+          }
+        }
+      }
     }
 
     return peaks;
   }
 
   /**
-   * Detects both light AND dark translucent/diagonal watermarks without eroding
-   * thin 1-2px glyph strokes, then expands any repeating pattern via NCC template
-   * matching so diagonal strings over faces/hair/clothing are found too.
+   * Resolution-adaptive Top-Hat + Black-Hat + PCA + NCC detector.
    */
   function detectTranslucentInRegion(gray, imgW, imgH, rx, ry, rw, rh, sensitivity, dilatePx) {
-    const sub = new Float32Array(rw * rh);
+    const subFull = new Float32Array(rw * rh);
     for (let y = 0; y < rh; y++) {
       const srcOff = (ry + y) * imgW + rx;
       const dstOff = y * rw;
       for (let x = 0; x < rw; x++) {
-        sub[dstOff + x] = gray[srcOff + x];
+        subFull[dstOff + x] = gray[srcOff + x];
       }
     }
 
-    // Dual-scale Top-Hat (bright text) & Black-Hat (dark text) — preserves 1-2px strokes!
-    const open2 = morphOpenGray(sub, rw, rh, 2);
-    const open4 = morphOpenGray(sub, rw, rh, 4);
-    const close2 = morphCloseGray(sub, rw, rh, 2);
-    const close4 = morphCloseGray(sub, rw, rh, 4);
+    // Run morphological stroke detection at <= 720px so stroke radii match fonts across all resolutions
+    const detScale = Math.min(1.0, 720.0 / Math.max(rw, rh));
+    const dw = Math.max(24, Math.round(rw * detScale));
+    const dh = Math.max(24, Math.round(rh * detScale));
+    const sub = detScale < 0.98 ? resizeGrayBilinear(subFull, rw, rh, dw, dh) : subFull;
+
+    const open2 = morphOpenGray(sub, dw, dh, 2);
+    const open4 = morphOpenGray(sub, dw, dh, 4);
+    const close2 = morphCloseGray(sub, dw, dh, 2);
+    const close4 = morphCloseGray(sub, dw, dh, 4);
 
     const thresh = Math.max(8, 17 - sensitivity * 12);
-    const bin = new Uint8Array(rw * rh);
+    const bin = new Uint8Array(dw * dh);
     for (let i = 0; i < bin.length; i++) {
       const th = Math.max(sub[i] - open2[i], sub[i] - open4[i]);
       const bh = Math.max(close2[i] - sub[i], close4[i] - sub[i]);
       if (Math.max(th, bh) >= thresh) bin[i] = 1;
     }
 
-    // Bridge nearby glyphs into words/phrases WITHOUT destroying thin strokes first
-    const connected = dilateBinary(bin, rw, rh, 5, 4);
-    const { labels, comps } = connectedComponents(connected, rw, rh);
-    const pad = Math.max(3, Math.min(8, dilatePx));
+    const connected = dilateBinary(bin, dw, dh, 5, 4);
+    const { labels, comps } = connectedComponents(connected, dw, dh);
+    const padScaled = Math.max(3, Math.min(8, dilatePx)) * detScale;
 
     const boxes = [];
     for (const c of comps) {
       if (c.area < 45 || c.width < 14 || c.height < 10) continue;
-      if (c.width > rw * 0.78 && c.height > rh * 0.78) continue;
+      if (c.width > dw * 0.78 && c.height > dh * 0.78) continue;
 
-      // Collect ONLY raw stroke pixels (`bin[idx] === 1`) inside this component for PCA & white-paper check
       const rawPts = [];
       let bgHigh = 0, darkLow = 0, samples = 0;
       for (let yy = c.y; yy < c.y + c.height; yy++) {
-        const off = yy * rw;
+        const off = yy * dw;
         for (let xx = c.x; xx < c.x + c.width; xx++) {
           if (labels[off + xx] === c.id && bin[off + xx]) {
             rawPts.push([xx, yy]);
@@ -561,33 +752,31 @@
         continue;
       }
 
-      const orient = computeOrientedPolygonFromPoints(rawPts, pad, rw, rh);
+      const orient = computeOrientedPolygonFromPoints(rawPts, padScaled, dw, dh);
       if (!orient) continue;
 
-      // Reject giant amorphous texture blocks; keep sleek text lines & compact emblems
       const aspect = Math.max(orient.lengthU, 1) / Math.max(orient.heightV, 1);
       const fillRatio = rawPts.length / Math.max(1, orient.lengthU * orient.heightV);
-      if (aspect < 1.2 && orient.lengthU > rw * 0.25) continue;
-      if (fillRatio > 0.65 && orient.lengthU > rw * 0.25) continue;
+      if (aspect < 1.2 && orient.lengthU > dw * 0.25) continue;
+      if (fillRatio > 0.65 && orient.lengthU > dw * 0.25) continue;
 
-      const bx = Math.max(0, rx + c.x - pad);
-      const by = Math.max(0, ry + c.y - pad);
-      const bw = Math.min(imgW - bx, c.width + pad * 2);
-      const bh = Math.min(imgH - by, c.height + pad * 2);
-
-      // Score candidate quality as a clean repeating seed (elongated + high crisp contrast + uniform bg)
       let bgVar = 0, meanSub = 0;
       for (let k = 0; k < rawPts.length; k++) {
         const [px, py] = rawPts[k];
-        meanSub += open4[py * rw + px];
+        meanSub += open4[py * dw + px];
       }
       meanSub /= rawPts.length;
       for (let k = 0; k < rawPts.length; k++) {
         const [px, py] = rawPts[k];
-        const d = open4[py * rw + px] - meanSub;
+        const d = open4[py * dw + px] - meanSub;
         bgVar += d * d;
       }
       bgVar = Math.sqrt(bgVar / rawPts.length);
+
+      const bx = Math.max(0, Math.round(rx + (c.x - padScaled) / detScale));
+      const by = Math.max(0, Math.round(ry + (c.y - padScaled) / detScale));
+      const bw = Math.min(imgW - bx, Math.round((c.width + padScaled * 2) / detScale));
+      const bh = Math.min(imgH - by, Math.round((c.height + padScaled * 2) / detScale));
 
       const box = {
         x: bx,
@@ -596,22 +785,25 @@
         height: bh,
         type: 'translucent_grid',
         label: orient.angleDeg > 8 ? 'Diagonal Watermark' : 'Watermark Overlay',
-        _seedScore: (orient.angleDeg > 8 ? 2.0 : 1.0) * Math.min(3.5, aspect) * Math.sqrt(rawPts.length) / (1.0 + bgVar * 0.08)
+        _seedScore: (orient.angleDeg > 8 ? 2.0 : 1.0) * Math.min(3.5, aspect) * Math.sqrt(rawPts.length) / (1.0 + bgVar * 0.28)
       };
       if (orient.angleDeg > 8) {
-        box.polygon = orient.polygon.map(([px, py]) => [rx + px, ry + py]);
+        box.polygon = orient.polygon.map(([px, py]) => [
+          Math.max(0, Math.min(imgW - 1, Math.round(rx + px / detScale))),
+          Math.max(0, Math.min(imgH - 1, Math.round(ry + py / detScale)))
+        ]);
         box.angle = orient.angleDeg;
       }
       boxes.push(box);
     }
 
-    // If we found clean candidate(s), run fast NCC template matching across the region to capture ALL repeating copies!
     if (boxes.length >= 1) {
       boxes.sort((a, b) => (b._seedScore || 0) - (a._seedScore || 0));
       const bestSeed = boxes[0];
+      const hpR = Math.max(6, Math.round(6 / detScale));
+      const blurR = fastBoxBlurFloat(subFull, rw, rh, hpR);
       const hpSub = new Float32Array(rw * rh);
-      const blur9 = fastBoxBlurFloat(sub, rw, rh, 6);
-      for (let i = 0; i < hpSub.length; i++) hpSub[i] = sub[i] - blur9[i];
+      for (let i = 0; i < hpSub.length; i++) hpSub[i] = subFull[i] - blurR[i];
 
       const localSeed = {
         x: bestSeed.x - rx,
@@ -619,14 +811,16 @@
         width: bestSeed.width,
         height: bestSeed.height
       };
-      const peaks = findRepeatingTemplatePeaks(hpSub, rw, rh, localSeed, 0.36);
+      const peaks = findRepeatingTemplatePeaks(hpSub, rw, rh, localSeed, 0.42);
       if (peaks.length >= 3) {
         const expandedBoxes = [];
         for (const pk of peaks) {
-          const bx = Math.max(0, rx + pk.px);
-          const by = Math.max(0, ry + pk.py);
-          const bw = Math.min(imgW - bx, pk.sw - Math.max(0, -pk.px));
-          const bh = Math.min(imgH - by, pk.sh - Math.max(0, -pk.py));
+          const pxRound = Math.round(pk.px);
+          const pyRound = Math.round(pk.py);
+          const bx = Math.max(0, rx + pxRound);
+          const by = Math.max(0, ry + pyRound);
+          const bw = Math.min(imgW - bx, pk.sw - Math.max(0, -pxRound));
+          const bh = Math.min(imgH - by, pk.sh - Math.max(0, -pyRound));
           if (bw < 10 || bh < 10) continue;
 
           const b = {
@@ -692,8 +886,7 @@
   }
 
   /**
-   * Computes background RGB values at masked pixels using normalized multi-scale
-   * push-pull pyramid convolution strictly from unmasked pixels.
+   * Multi-scale Push-Pull Harmonic Pyramid Fill strictly from unmasked pixels.
    */
   function harmonicMaskedFill(srcData, binMask, w, h) {
     const len = w * h;
@@ -791,7 +984,11 @@
     return { rArr, gArr, bArr };
   }
 
-  function clientContentAwareInpaint(srcImgData, binMask, w, h, pdePasses = 12) {
+  /**
+   * Multi-Scale Harmonic Pyramid + Border-Guided Exemplar Texture Synthesis + Sensor Grain.
+   * Prevents blurry patches when filling larger opaque logos, corner sparkles, or boxes.
+   */
+  function clientContentAwareInpaint(srcImgData, binMask, w, h, pdePasses = 12, useExemplar = true) {
     const src = srcImgData.data;
     const out = new Uint8ClampedArray(src);
     const { rArr, gArr, bArr } = harmonicMaskedFill(src, binMask, w, h);
@@ -820,6 +1017,7 @@
       }
     }
 
+    // Measure local ring sensor noise & check if border has sharp natural textures worth exemplar copying
     const dilatedOuter = dilateBinary(binMask, w, h, 8);
     const blurGray = fastBoxBlurFloat(extractGray(src, w, h), w, h, 2);
     let sqSum = 0, ringCnt = 0;
@@ -832,7 +1030,60 @@
         ringCnt++;
       }
     }
-    const noiseStd = ringCnt > 20 ? Math.min(6.0, Math.sqrt(sqSum / ringCnt) * 0.45) : 1.2;
+    const ringStd = ringCnt > 20 ? Math.sqrt(sqSum / ringCnt) : 0;
+    const noiseStd = ringCnt > 20 ? Math.min(6.0, ringStd * 0.45) : 1.0;
+
+    // Optional onion-peel exemplar high-frequency texture transfer for textured opaque boxes
+    if (useExemplar && ringStd > 3.5 && maskedIdx.length >= 40 && maskedIdx.length <= 80000) {
+      const synthMask = new Uint8Array(binMask);
+      const texR = new Float32Array(w * h);
+      const texG = new Float32Array(w * h);
+      const texB = new Float32Array(w * h);
+      // Extract local high-pass texture outside mask
+      const rSmooth = fastBoxBlurFloat(rArr, w, h, 3);
+      const gSmooth = fastBoxBlurFloat(gArr, w, h, 3);
+      const bSmooth = fastBoxBlurFloat(bArr, w, h, 3);
+      for (let i = 0; i < w * h; i++) {
+        if (!binMask[i]) {
+          texR[i] = rArr[i] - rSmooth[i];
+          texG[i] = gArr[i] - gSmooth[i];
+          texB[i] = bArr[i] - bSmooth[i];
+        }
+      }
+
+      // Copy nearest matching texture patch from unmasked ring by harmonic color & local gradient match
+      const searchR = 14;
+      for (let m = 0; m < maskedIdx.length; m++) {
+        const idx = maskedIdx[m];
+        const x = idx % w;
+        const y = (idx - x) / w;
+        const tr = rArr[idx], tg = gArr[idx], tb = bArr[idx];
+        let bestErr = 1e9, bestSrc = -1;
+        for (let dy = -searchR; dy <= searchR; dy += 2) {
+          const sy = y + dy;
+          if (sy < 2 || sy >= h - 2) continue;
+          for (let dx = -searchR; dx <= searchR; dx += 2) {
+            const sx = x + dx;
+            if (sx < 2 || sx >= w - 2) continue;
+            const sIdx = sy * w + sx;
+            if (synthMask[sIdx]) continue;
+            const dr = rSmooth[sIdx] - tr;
+            const dg = gSmooth[sIdx] - tg;
+            const db = bSmooth[sIdx] - tb;
+            const err = dr * dr + dg * dg + db * db + 0.15 * (dx * dx + dy * dy);
+            if (err < bestErr) {
+              bestErr = err;
+              bestSrc = sIdx;
+            }
+          }
+        }
+        if (bestSrc >= 0) {
+          rArr[idx] += texR[bestSrc] * 0.65;
+          gArr[idx] += texG[bestSrc] * 0.65;
+          bArr[idx] += texB[bestSrc] * 0.65;
+        }
+      }
+    }
 
     let seed = 1337;
     const nextNoise = () => {
@@ -857,10 +1108,13 @@
   }
 
   /**
-   * Dekel-style Multi-Instance Median Matte Recovery in Browser JS:
-   * Aligns >=3 repeating copies inside the mask (or auto-discovered via NCC),
-   * extracts the exact per-pixel median matte (Y, Cb, Cr) so background textures
-   * cancel out completely, and removes all copies with inverse alpha recovery.
+   * Sub-pixel Dekel Multi-Instance YCbCr Matte Recovery (mirrors backend remover.py):
+   * 1. Finds repeating template peaks with 0.25px precision.
+   * 2. Recovers true uncontaminated local backgrounds per copy via harmonicMaskedFill on coarse stroke mask.
+   * 3. Computes signed alpha_Y in [-0.045, 0.50] (canceling JPEG dark ringing rims!) AND
+   *    chroma alpha_C in [0, 0.45] across aligned bilinear patches.
+   * 4. Splat-projects sub-pixel shifted mattes across peaks with single-pass max (no double subtraction).
+   * 5. Applies inverse YCbCr deblending + smooth-sky healing (bgStd < 5.0) + textured spike cleanup.
    */
   function tryDekelMultiInstanceClient(srcImgData, binMask, w, h, colorHint) {
     const src = srcImgData.data;
@@ -868,11 +1122,11 @@
     if (comps.length < 3) return null;
 
     const ySrc = extractGray(src, w, h);
-    const blur6 = fastBoxBlurFloat(ySrc, w, h, 6);
+    const blurR = Math.max(5, Math.round(Math.min(w, h) * 0.018));
+    const blurMap = fastBoxBlurFloat(ySrc, w, h, blurR);
     const hpY = new Float32Array(w * h);
-    for (let i = 0; i < hpY.length; i++) hpY[i] = ySrc[i] - blur6[i];
+    for (let i = 0; i < hpY.length; i++) hpY[i] = ySrc[i] - blurMap[i];
 
-    // Score each masked component to pick the cleanest template seed
     let bestComp = null;
     let bestScore = -1;
     for (const c of comps) {
@@ -884,7 +1138,7 @@
           const idx = off + xx;
           if (!binMask[idx]) continue;
           hpEnergy += Math.abs(hpY[idx]);
-          meanBg += blur6[idx];
+          meanBg += blurMap[idx];
           cnt++;
         }
       }
@@ -895,12 +1149,13 @@
         for (let xx = c.x; xx < c.x + c.width; xx++) {
           const idx = off + xx;
           if (!binMask[idx]) continue;
-          const d = blur6[idx] - meanBg;
+          const d = blurMap[idx] - meanBg;
           bgVar += d * d;
         }
       }
       const stdBg = Math.sqrt(bgVar / cnt);
-      const score = (hpEnergy / cnt) * Math.sqrt(cnt) / (1.0 + stdBg * 0.1);
+      // Strongly prefer clean uniform sky/background components (not high-variance edges/faces)
+      const score = (hpEnergy / cnt) * Math.sqrt(cnt) / (1.0 + stdBg * 0.35);
       if (score > bestScore) {
         bestScore = score;
         bestComp = c;
@@ -908,21 +1163,21 @@
     }
     if (!bestComp) return null;
 
-    const peaks = findRepeatingTemplatePeaks(hpY, w, h, bestComp, 0.36);
+    const peaks = findRepeatingTemplatePeaks(hpY, w, h, bestComp, 0.42);
     if (peaks.length < 3) return null;
 
     const pw = bestComp.width;
     const ph = bestComp.height;
     const patchLen = pw * ph;
 
-    // Determine watermark target polarity & color
     let sumSigned = 0, sCnt = 0;
     for (const pk of peaks) {
+      const ix = Math.round(pk.px), iy = Math.round(pk.py);
       for (let y = 0; y < ph; y++) {
-        const gy = pk.py + y;
+        const gy = iy + y;
         if (gy < 0 || gy >= h) continue;
         for (let x = 0; x < pw; x++) {
-          const gx = pk.px + x;
+          const gx = ix + x;
           if (gx < 0 || gx >= w) continue;
           const val = hpY[gy * w + gx];
           if (Math.abs(val) > 5.0) { sumSigned += val; sCnt++; }
@@ -941,18 +1196,22 @@
     }
     const wmTargetY = rgbToY(wmTargetR, wmTargetG, wmTargetB);
 
-    // Step 1: Identify true watermark stroke footprint via median high-pass across aligned copies
+    // Learn clean matte ONLY from high-confidence peaks (cluttered bg peaks get cleaned later via lattice projection)
+    const mattePeaks = peaks.filter((pk) => pk.ncc >= 0.36);
+    const learnPeaks = mattePeaks.length >= 3 ? mattePeaks : peaks;
+
+    // Step 1: Align bilinear high-pass patches at exact sub-pixel peak coordinates
     const medHp = new Float32Array(patchLen);
-    const hpSamples = new Float32Array(peaks.length);
+    const hpSamples = new Float32Array(learnPeaks.length);
     for (let i = 0; i < patchLen; i++) {
       const lx = i % pw;
       const ly = (i - lx) / pw;
       let k = 0;
-      for (let pIdx = 0; pIdx < peaks.length; pIdx++) {
-        const gx = peaks[pIdx].px + lx;
-        const gy = peaks[pIdx].py + ly;
-        if (gx < 0 || gx >= w || gy < 0 || gy >= h) continue;
-        const val = hpY[gy * w + gx];
+      for (let pIdx = 0; pIdx < learnPeaks.length; pIdx++) {
+        const gx = learnPeaks[pIdx].px + lx;
+        const gy = learnPeaks[pIdx].py + ly;
+        if (gx < 0 || gx > w - 1 || gy < 0 || gy > h - 1) continue;
+        const val = sampleBilinearFloat(hpY, w, h, gx, gy);
         hpSamples[k++] = isLight ? val : -val;
       }
       if (k >= 2) {
@@ -961,174 +1220,221 @@
       }
     }
 
-    // Build tight binary stroke template (dilated 1px ONLY so thin letters never fuse into blur bands)
+    // Build tile strip mask covering strokes + immediate JPEG ringing rim (dilated 2px)
     const rawStroke = new Uint8Array(patchLen);
     let rawStrokeCount = 0;
     for (let i = 0; i < patchLen; i++) {
-      if (medHp[i] >= 4.0) {
+      if (medHp[i] >= 2.8) {
         rawStroke[i] = 1;
         rawStrokeCount++;
       }
     }
     if (rawStrokeCount < 20) return null;
-    const strokePatchMask = dilateBinary(rawStroke, pw, ph, 1);
+    const stripPatch = dilateBinary(rawStroke, pw, ph, 2);
 
-    // Check how many user-masked pixels overlap the watermark peaks
+    // Check overlap with user mask
     let overlapPeaks = 0;
     for (const pk of peaks) {
+      const ix = Math.round(pk.px), iy = Math.round(pk.py);
       let hit = 0;
       for (let y = 0; y < ph; y++) {
-        const gy = pk.py + y;
+        const gy = iy + y;
         if (gy < 0 || gy >= h) continue;
         for (let x = 0; x < pw; x++) {
-          const gx = pk.px + x;
+          const gx = ix + x;
           if (gx < 0 || gx >= w) continue;
-          if (binMask[gy * w + gx] && strokePatchMask[y * pw + x]) { hit++; break; }
+          if (binMask[gy * w + gx] && stripPatch[y * pw + x]) { hit++; break; }
         }
         if (hit) break;
       }
       if (hit) overlapPeaks++;
     }
 
-    // Step 2: Project exact stroke mask globally and compute UNCONTAMINATED background via harmonicMaskedFill
-    const globalStrokeMask = new Uint8Array(w * h);
+    // Step 2: Project global strip mask and recover uncontaminated local background strictly from outside strips
+    const globalStripMask = new Uint8Array(w * h);
     for (const pk of peaks) {
+      const ix = Math.round(pk.px), iy = Math.round(pk.py);
       for (let y = 0; y < ph; y++) {
-        const gy = pk.py + y;
+        const gy = iy + y;
         if (gy < 0 || gy >= h) continue;
         for (let x = 0; x < pw; x++) {
-          const gx = pk.px + x;
+          const gx = ix + x;
           if (gx < 0 || gx >= w) continue;
           const gIdx = gy * w + gx;
           if (overlapPeaks <= 1 && !binMask[gIdx]) continue;
-          if (strokePatchMask[y * pw + x]) globalStrokeMask[gIdx] = 1;
+          if (stripPatch[y * pw + x]) globalStripMask[gIdx] = 1;
         }
       }
     }
 
-    const cleanBg = harmonicMaskedFill(src, globalStrokeMask, w, h);
+    const cleanBg = harmonicMaskedFill(src, globalStripMask, w, h);
 
-    // Step 3: Compute uncontaminated per-pixel median alpha across aligned copies
-    const medianAlpha = new Float32Array(patchLen);
-    const samplesArr = new Float32Array(peaks.length);
+    // Step 3: Compute signed Y alpha [-0.045, 0.50] AND chroma alpha_C [0, 0.45] across clean peaks only
+    const alphaY = new Float32Array(patchLen);
+    const alphaC = new Float32Array(patchLen);
+    const ySamples = new Float32Array(learnPeaks.length);
+    const cSamples = new Float32Array(learnPeaks.length * 2);
+
     for (let i = 0; i < patchLen; i++) {
-      if (!strokePatchMask[i]) continue;
+      if (!stripPatch[i]) continue;
       const lx = i % pw;
       const ly = (i - lx) / pw;
-      let k = 0;
-      for (let pIdx = 0; pIdx < peaks.length; pIdx++) {
-        const gx = peaks[pIdx].px + lx;
-        const gy = peaks[pIdx].py + ly;
-        if (gx < 0 || gx >= w || gy < 0 || gy >= h) continue;
-        const idx = gy * w + gx;
-        const bgY = rgbToY(cleanBg.rArr[idx], cleanBg.gArr[idx], cleanBg.bArr[idx]);
-        const dev = isLight ? (ySrc[idx] - bgY) : (bgY - ySrc[idx]);
-        const denom = isLight ? Math.max(20.0, 255.0 - bgY) : Math.max(20.0, bgY);
-        samplesArr[k++] = Math.max(0.0, Math.min(0.75, dev / denom));
+      let ky = 0, kc = 0;
+      for (let pIdx = 0; pIdx < learnPeaks.length; pIdx++) {
+        const gx = learnPeaks[pIdx].px + lx;
+        const gy = learnPeaks[pIdx].py + ly;
+        if (gx < 0 || gx > w - 1 || gy < 0 || gy > h - 1) continue;
+
+        const [sr, sg, sb] = sampleBilinearRGB(src, w, h, gx, gy);
+        const br = sampleBilinearFloat(cleanBg.rArr, w, h, gx, gy);
+        const bg = sampleBilinearFloat(cleanBg.gArr, w, h, gx, gy);
+        const bb = sampleBilinearFloat(cleanBg.bArr, w, h, gx, gy);
+
+        const yT = 0.299 * sr + 0.587 * sg + 0.114 * sb;
+        const yB = 0.299 * br + 0.587 * bg + 0.114 * bb;
+        const dy = isLight ? (yT - yB) : (yB - yT);
+        const denomY = isLight ? Math.max(35.0, wmTargetY - yB) : Math.max(35.0, yB - wmTargetY);
+        ySamples[ky++] = Math.max(-0.05, Math.min(0.50, dy / denomY));
+
+        const cbT = -0.168736 * sr - 0.331264 * sg + 0.5 * sb + 128.0;
+        const cbB = -0.168736 * br - 0.331264 * bg + 0.5 * bb + 128.0;
+        const crT = 0.5 * sr - 0.418688 * sg - 0.081312 * sb + 128.0;
+        const crB = 0.5 * br - 0.418688 * bg - 0.081312 * bb + 128.0;
+        if (Math.abs(128.0 - cbB) > 10.0) {
+          cSamples[kc++] = Math.max(-0.10, Math.min(0.45, (cbT - cbB) / (128.0 - cbB)));
+        }
+        if (Math.abs(128.0 - crB) > 10.0) {
+          cSamples[kc++] = Math.max(-0.10, Math.min(0.45, (crT - crB) / (128.0 - crB)));
+        }
       }
-      if (k >= 2) {
-        const sub = samplesArr.subarray(0, k).slice().sort();
-        medianAlpha[i] = sub[Math.floor(k * 0.5)];
+      if (ky >= 2) {
+        const subY = ySamples.subarray(0, ky).slice().sort();
+        const ay = Math.max(-0.045, Math.min(0.48, subY[Math.floor(ky * 0.5)]));
+        alphaY[i] = Math.abs(ay) >= 0.015 ? ay : 0.0;
+      }
+      if (kc >= 2) {
+        const subC = cSamples.subarray(0, kc).slice().sort();
+        const ac = Math.max(0.0, Math.min(0.45, subC[Math.floor(kc * 0.5)]));
+        alphaC[i] = ac >= 0.015 ? ac : 0.0;
       }
     }
 
-    // Assemble global alpha map via max across peaks (prevents double-subtraction)
-    const globalAlpha = new Float32Array(w * h);
+    // Step 4: Project sub-pixel shifted mattes globally using single-pass max (and negative ringing fallback)
+    const globalAY = new Float32Array(w * h);
+    const globalAC = new Float32Array(w * h);
     for (const pk of peaks) {
-      for (let y = 0; y < ph; y++) {
-        const gy = pk.py + y;
+      const ix = Math.floor(pk.px), iy = Math.floor(pk.py);
+      const fx = pk.px - ix, fy = pk.py - iy;
+      for (let y = 0; y <= ph; y++) {
+        const gy = iy + y;
         if (gy < 0 || gy >= h) continue;
-        for (let x = 0; x < pw; x++) {
-          const gx = pk.px + x;
+        for (let x = 0; x <= pw; x++) {
+          const gx = ix + x;
           if (gx < 0 || gx >= w) continue;
           const gIdx = gy * w + gx;
-          if (!globalStrokeMask[gIdx]) continue;
-          const a = medianAlpha[y * pw + x];
-          if (a > globalAlpha[gIdx]) globalAlpha[gIdx] = a;
+          if (overlapPeaks <= 1 && !binMask[gIdx]) continue;
+
+          // Backward-map fractional offset (x - fx, y - fy) inside patch
+          const sx = x - fx, sy = y - fy;
+          if (sx < 0 || sx > pw - 1 || sy < 0 || sy > ph - 1) continue;
+          const ay = sampleBilinearFloat(alphaY, pw, ph, sx, sy);
+          const ac = sampleBilinearFloat(alphaC, pw, ph, sx, sy);
+          if (ay > globalAY[gIdx]) globalAY[gIdx] = ay;
+          else if (ay < 0 && globalAY[gIdx] === 0) globalAY[gIdx] = ay;
+          if (ac > globalAC[gIdx]) globalAC[gIdx] = ac;
         }
       }
     }
 
-    // Step 4: Estimate background texture std on CLEAN background (zero watermark leakage!)
-    const cleanY = new Float32Array(w * h);
-    const cleanYSq = new Float32Array(w * h);
-    for (let i = 0; i < cleanY.length; i++) {
-      const v = rgbToY(cleanBg.rArr[i], cleanBg.gArr[i], cleanBg.bArr[i]);
-      cleanY[i] = v;
-      cleanYSq[i] = v * v;
-    }
-    const b1 = fastBoxBlurFloat(cleanY, w, h, 3);
-    const b2 = fastBoxBlurFloat(cleanYSq, w, h, 3);
-
+    // Step 5: Exact YCbCr inverse alpha recovery (mirrors remover.py lines 575-599)
     const out = new Uint8ClampedArray(src);
-    const smoothHole = new Uint8Array(w * h);
-    let hasSmooth = false;
+    for (let i = 0; i < w * h; i++) {
+      const ay = globalAY[i];
+      const ac = globalAC[i];
+      if (ay === 0 && ac === 0) continue;
 
-    for (let i = 0; i < globalStrokeMask.length; i++) {
-      if (!globalStrokeMask[i]) continue;
-      const rawA = globalAlpha[i];
       const p = i * 4;
-      const bgStd = Math.sqrt(Math.max(0, b2[i] - b1[i] * b1[i]));
+      const r = src[p], g = src[p + 1], b = src[p + 2];
+      const yVal = 0.299 * r + 0.587 * g + 0.114 * b;
+      const cb = -0.168736 * r - 0.331264 * g + 0.5 * b + 128.0;
+      const cr = 0.5 * r - 0.418688 * g - 0.081312 * b + 128.0;
 
-      if (bgStd < 6.5) {
-        // Enclose entire stroke + JPEG ringing rim on smooth sky/clouds cleanly in harmonic fill
-        smoothHole[i] = 1;
-        hasSmooth = true;
-      } else if (rawA >= 0.04) {
-        // Textured hair, eyes, teeth & skin folds: YCbCr inverse alpha preserves natural skin/hair chroma
-        const a = Math.min(0.45, rawA * 0.85);
-        const inv = Math.max(0.55, 1.0 - a);
-        const r = src[p], g = src[p + 1], b = src[p + 2];
-        const yVal = 0.299 * r + 0.587 * g + 0.114 * b;
-        const cb = -0.168736 * r - 0.331264 * g + 0.5 * b + 128.0;
-        const cr = 0.5 * r - 0.418688 * g - 0.081312 * b + 128.0;
+      const yRec = (yVal - ay * wmTargetY) / Math.max(0.45, 1.0 - ay);
+      const cbRec = (cb - ac * 128.0) / Math.max(0.45, 1.0 - ac);
+      const crRec = (cr - ac * 128.0) / Math.max(0.45, 1.0 - ac);
 
-        let yRec = (yVal - a * wmTargetY) / inv;
-        // Clamp luminance deviation relative to clean local bg to prevent dark JPEG crush dots
-        if (isLight) yRec = Math.max(cleanY[i] - 28.0, yRec);
-        else yRec = Math.min(cleanY[i] + 28.0, yRec);
+      out[p] = clamp255(yRec + 1.402 * (crRec - 128.0));
+      out[p + 1] = clamp255(yRec - 0.344136 * (cbRec - 128.0) - 0.714136 * (crRec - 128.0));
+      out[p + 2] = clamp255(yRec + 1.772 * (cbRec - 128.0));
+    }
 
-        const cbRec = 128.0 + (cb - 128.0) / Math.max(0.65, 1.0 - a * 0.7);
-        const crRec = 128.0 + (cr - 128.0) / Math.max(0.65, 1.0 - a * 0.7);
-
-        out[p] = clamp255(yRec + 1.402 * (crRec - 128.0));
-        out[p + 1] = clamp255(yRec - 0.344136 * (cbRec - 128.0) - 0.714136 * (crRec - 128.0));
-        out[p + 2] = clamp255(yRec + 1.772 * (cbRec - 128.0));
+    // Compute 3x3 median & local background texture variance on RECOVERED image (just like remover.py!)
+    const med3 = new Uint8ClampedArray(out);
+    const outGray = new Float32Array(w * h);
+    const tmp9 = new Float32Array(9);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        const p = i * 4;
+        if (x > 0 && x < w - 1 && y > 0 && y < h - 1 && globalAY[i] !== 0) {
+          for (let ch = 0; ch < 3; ch++) {
+            let k = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+              for (let dx = -1; dx <= 1; dx++) {
+                tmp9[k++] = out[((y + dy) * w + (x + dx)) * 4 + ch];
+              }
+            }
+            tmp9.sort();
+            med3[p + ch] = tmp9[4];
+          }
+        }
+        outGray[i] = rgbToY(med3[p], med3[p + 1], med3[p + 2]);
       }
     }
 
-    // 3x3 median spike suppression on textured high-alpha strokes
-    const medCleaned = new Uint8ClampedArray(out);
-    const tmp9 = new Float32Array(9);
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
-        const i = y * w + x;
-        if (smoothHole[i] || globalAlpha[i] <= 0.12) continue;
+    // Compute texture variance from clean unwatermarked background (NOT corrupted outGray!)
+    const cleanGray = new Float32Array(w * h);
+    const cleanSq = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      const yB = rgbToY(cleanBg.rArr[i], cleanBg.gArr[i], cleanBg.bArr[i]);
+      cleanGray[i] = yB;
+      cleanSq[i] = yB * yB;
+    }
+    const b1 = fastBoxBlurFloat(cleanGray, w, h, 3);
+    const b2 = fastBoxBlurFloat(cleanSq, w, h, 3);
+
+    const smoothHole = new Uint8Array(w * h);
+    let hasSmooth = false;
+    for (let i = 0; i < w * h; i++) {
+      const ay = globalAY[i];
+      if (ay === 0) continue;
+      const bgStd = Math.sqrt(Math.max(0, b2[i] - b1[i] * b1[i]));
+      if (bgStd < 5.2 && Math.abs(ay) >= 0.020) {
+        smoothHole[i] = 1;
+        hasSmooth = true;
+      } else if (ay > 0.14 && bgStd >= 5.2) {
         const p = i * 4;
-        for (let ch = 0; ch < 3; ch++) {
-          let k = 0;
-          for (let dy = -1; dy <= 1; dy++) {
-            for (let dx = -1; dx <= 1; dx++) {
-              tmp9[k++] = out[((y + dy) * w + (x + dx)) * 4 + ch];
-            }
-          }
-          tmp9.sort();
-          const med = tmp9[4];
-          if (Math.abs(out[p + ch] - med) > 7.5) medCleaned[p + ch] = med;
+        const d = Math.max(
+          Math.abs(out[p] - med3[p]),
+          Math.abs(out[p + 1] - med3[p + 1]),
+          Math.abs(out[p + 2] - med3[p + 2])
+        );
+        if (d > 7.5) {
+          out[p] = med3[p];
+          out[p + 1] = med3[p + 1];
+          out[p + 2] = med3[p + 2];
         }
       }
     }
 
     if (hasSmooth) {
-      return clientContentAwareInpaint(new ImageData(medCleaned, w, h), smoothHole, w, h, 8);
+      return clientContentAwareInpaint(new ImageData(out, w, h), smoothHole, w, h, 6, false);
     }
-    return new ImageData(medCleaned, w, h);
+    return new ImageData(out, w, h);
   }
 
   /**
-   * Single-region Stroke-Aware Inverse Alpha Recovery when watermark doesn't repeat:
-   * isolates stroke ink via Top-Hat/Black-Hat strictly inside mask so cloud/object edges
-   * are never smeared.
+   * Single-region Stroke-Aware YCbCr Inverse Alpha Recovery for non-repeating watermarks.
    */
   function clientStrokeDeblend(srcImgData, binMask, w, h, colorHint, alphaHint = 0.5) {
     const dekelResult = tryDekelMultiInstanceClient(srcImgData, binMask, w, h, colorHint);
@@ -1142,13 +1448,12 @@
     const close3 = morphCloseGray(ySrc, w, h, 3);
 
     let isLight = true;
-    let wmTargetR = 255.0, wmTargetG = 255.0, wmTargetB = 255.0, wmTargetY = 255.0;
+    let wmTargetR = 255.0, wmTargetG = 255.0, wmTargetB = 255.0;
     if (colorHint && colorHint !== 'auto' && colorHint.startsWith('#') && colorHint.length === 7) {
       wmTargetR = parseInt(colorHint.slice(1, 3), 16);
       wmTargetG = parseInt(colorHint.slice(3, 5), 16);
       wmTargetB = parseInt(colorHint.slice(5, 7), 16);
-      wmTargetY = rgbToY(wmTargetR, wmTargetG, wmTargetB);
-      isLight = wmTargetY > 128.0;
+      isLight = rgbToY(wmTargetR, wmTargetG, wmTargetB) > 128.0;
     } else {
       let sumTH = 0, sumBH = 0;
       for (let i = 0; i < len; i++) {
@@ -1157,22 +1462,22 @@
         sumBH += Math.max(0, close3[i] - ySrc[i]);
       }
       isLight = sumTH >= sumBH;
-      wmTargetY = isLight ? 255.0 : 0.0;
-      wmTargetR = wmTargetG = wmTargetB = wmTargetY;
+      wmTargetR = wmTargetG = wmTargetB = isLight ? 255.0 : 0.0;
     }
+    const wmTargetY = rgbToY(wmTargetR, wmTargetG, wmTargetB);
 
     const strokeMask = new Uint8Array(len);
     let strokeCnt = 0;
     for (let i = 0; i < len; i++) {
       if (!binMask[i]) continue;
       const dev = isLight ? (ySrc[i] - open3[i]) : (close3[i] - ySrc[i]);
-      if (dev >= 5.5) {
+      if (dev >= 5.0) {
         strokeMask[i] = 1;
         strokeCnt++;
       }
     }
     if (strokeCnt < 8) {
-      return clientContentAwareInpaint(srcImgData, binMask, w, h, 14);
+      return clientContentAwareInpaint(srcImgData, binMask, w, h, 14, true);
     }
 
     const softStroke = dilateBinary(strokeMask, w, h, 1);
@@ -1188,33 +1493,43 @@
       bgY[i] = val;
       bgYSq[i] = val * val;
     }
-    const m1 = fastBoxBlurFloat(bgY, w, h, 4);
-    const m2 = fastBoxBlurFloat(bgYSq, w, h, 4);
+    const m1 = fastBoxBlurFloat(bgY, w, h, 3);
+    const m2 = fastBoxBlurFloat(bgYSq, w, h, 3);
 
     const smoothHole = new Uint8Array(len);
     let hasSmooth = false;
     for (let i = 0; i < len; i++) {
       if (!softStroke[i]) continue;
-      const denom = isLight ? Math.max(24.0, wmTargetY - bgY[i]) : Math.max(24.0, bgY[i] - wmTargetY);
+      const denom = isLight ? Math.max(30.0, wmTargetY - bgY[i]) : Math.max(30.0, bgY[i] - wmTargetY);
       const diff = isLight ? (ySrc[i] - bgY[i]) : (bgY[i] - ySrc[i]);
-      const a = Math.max(0.0, Math.min(Math.max(0.35, alphaHint * 1.4), diff / denom));
-      if (a < 0.04) continue;
+      const a = Math.max(-0.04, Math.min(Math.max(0.35, alphaHint * 1.15), diff / denom));
+      if (Math.abs(a) < 0.025) continue;
+
+      const p = i * 4;
+      const r = src[p], g = src[p + 1], b = src[p + 2];
+      const yVal = 0.299 * r + 0.587 * g + 0.114 * b;
+      const cb = -0.168736 * r - 0.331264 * g + 0.5 * b + 128.0;
+      const cr = 0.5 * r - 0.418688 * g - 0.081312 * b + 128.0;
+
+      const inv = Math.max(0.45, 1.0 - a);
+      const yRec = (yVal - a * wmTargetY) / inv;
+      const cbRec = 128.0 + (cb - 128.0) / Math.max(0.65, 1.0 - a * 0.6);
+      const crRec = 128.0 + (cr - 128.0) / Math.max(0.65, 1.0 - a * 0.6);
+
+      out[p] = clamp255(yRec + 1.402 * (crRec - 128.0));
+      out[p + 1] = clamp255(yRec - 0.344136 * (cbRec - 128.0) - 0.714136 * (crRec - 128.0));
+      out[p + 2] = clamp255(yRec + 1.772 * (cbRec - 128.0));
 
       const bgStd = Math.sqrt(Math.max(0, m2[i] - m1[i] * m1[i]));
-      if (bgStd < 4.5) {
+      if (a > 0.045 && bgStd < 5.0) {
         smoothHole[i] = 1;
         hasSmooth = true;
-      } else {
-        const inv = 1.0 - a;
-        const p = i * 4;
-        out[p] = clamp255((src[p] - a * wmTargetR) / inv);
-        out[p + 1] = clamp255((src[p + 1] - a * wmTargetG) / inv);
-        out[p + 2] = clamp255((src[p + 2] - a * wmTargetB) / inv);
       }
     }
 
     if (hasSmooth) {
-      return clientContentAwareInpaint(new ImageData(out, w, h), smoothHole, w, h, 8);
+      const smoothDil = dilateBinary(smoothHole, w, h, 1);
+      return clientContentAwareInpaint(new ImageData(out, w, h), smoothDil, w, h, 6, false);
     }
     return new ImageData(out, w, h);
   }
@@ -1237,17 +1552,17 @@
       return clientStrokeDeblend(srcImgData, binMask, w, h, colorHint, alphaHint);
     }
     if (mode === 'inpaint_telea') {
-      return clientContentAwareInpaint(srcImgData, binMask, w, h, 10);
+      return clientContentAwareInpaint(srcImgData, binMask, w, h, 10, true);
     }
     if (mode === 'inpaint_ns') {
-      return clientContentAwareInpaint(srcImgData, binMask, w, h, 24);
+      return clientContentAwareInpaint(srcImgData, binMask, w, h, 24, false);
     }
 
     const { comps } = connectedComponents(binMask, w, h);
     if (comps.length >= 3) {
       return clientStrokeDeblend(srcImgData, binMask, w, h, colorHint, alphaHint);
     }
-    return clientContentAwareInpaint(srcImgData, binMask, w, h, 14);
+    return clientContentAwareInpaint(srcImgData, binMask, w, h, 14, true);
   }
 
   async function uploadClientFile(file) {
