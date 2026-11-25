@@ -6,6 +6,9 @@
 
 **Remove. Restore. Reveal.** — An AI-powered digital watermark & overlay cleaning application for **images** (PNG, JPG, JPEG, WEBP, BMP) and **multi-page PDFs**, featuring smart auto-detection, interactive zoomed canvas selection, Big-LaMa neural inpainting, and zero-blur YCrCb inverse alpha restoration.
 
+- **Live Web App (GitHub Pages)**: [`https://editorakilan.github.io/Eraseon/`](https://editorakilan.github.io/Eraseon/) — runs 100% client-side in your browser for images and PDFs with zero server setup.
+- **Full AI Local Server**: Run `python run.py` locally to unlock Big-LaMa neural inpainting & RapidOCR tight rotated polygon detection.
+
 ---
 
 ## ✨ Key Features
@@ -54,6 +57,9 @@
 
 ```text
 Eraseon/
+├── index.html                          # GitHub Pages & local web UI entry point
+├── .nojekyll                           # Static asset hosting marker for GitHub Pages
+├── .github/workflows/deploy.yml        # GitHub Actions Pages deployment workflow
 ├── backend/
 │   ├── main.py                         # FastAPI server & REST API endpoints
 │   └── watermark_engine/
@@ -61,9 +67,9 @@ Eraseon/
 │       ├── remover.py                  # Big-LaMa inpainting & YCrCb lattice de-blending
 │       └── pdf_handler.py              # pypdfium2 PDF rasterization & reassembly
 ├── static/
-│   ├── index.html                      # Web UI layout
 │   ├── styles.css                      # Dark theme & canvas viewport styling
-│   ├── app.js                          # Canvas masking, zoom alignment & split slider
+│   ├── client_engine.js                # Serverless browser-side engine for GitHub Pages
+│   ├── app.js                          # Dual-mode UI controller, canvas masking & split slider
 │   ├── logo.png                        # Full Eraseon brand logo
 │   └── eraseon-icon.png                # App header icon & favicon
 ├── Eraseon_ Modern Digital Cleaning Logo.png

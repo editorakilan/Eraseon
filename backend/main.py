@@ -75,6 +75,9 @@ def parse_color_hex(hex_str: Optional[str]) -> Optional[tuple]:
 
 @app.get("/")
 async def root():
+    root_index = os.path.join(BASE_DIR, "index.html")
+    if os.path.exists(root_index):
+        return FileResponse(root_index)
     index_file = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_file):
         return FileResponse(index_file)

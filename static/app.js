@@ -18,10 +18,12 @@ const state = {
   rectStartY: 0,
   originalImage: null,
   cleanedImageSrc: null,
+  cleanedPdfBlobUrl: null,
   pageMasks: {}, // cache of mask dataURL per page
   detectedBoxes: [], // list of detected watermark bounding boxes
   applyAllPages: true,
   isSplitDragging: false,
+  useClientEngine: false,
 };
 
 // DOM Elements
@@ -109,7 +111,27 @@ const zoomLevel = document.getElementById('zoomLevel');
 
 // --- Initialization & Event Listeners ---
 
-function init() {
+async function detectBackendMode() {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 800);
+    const res = await fetch('api/health', { signal: controller.signal });
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.app) {
+        state.useClientEngine = false;
+        return;
+      }
+    }
+  } catch (_) {
+    // No Python backend reachable (e.g. GitHub Pages static hosting)
+  }
+  state.useClientEngine = Boolean(window.EraseonClientEngine);
+}
+
+async function init() {
+  await detectBackendMode();
   setupFileUpload();
   setupTools();
   setupCanvasDrawing();
@@ -139,18 +161,21 @@ function setupFileUpload() {
 
 async function uploadFile(file) {
   showLoading('Uploading file...', `Processing ${file.name}`);
-  const formData = new FormData();
-  formData.append('file', file);
 
   try {
-    const res = await fetch('/api/upload', {
-      method: 'POST',
-      body: formData
-    });
-
-    if (!res.ok) throw new Error(await res.text());
-
-    const data = await res.json();
+    let data;
+    if (state.useClientEngine) {
+      data = await window.EraseonClientEngine.uploadClientFile(file);
+    } else {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('api/upload', {
+        method: 'POST',
+        body: formData
+      });
+      if (!res.ok) throw new Error(await res.text());
+      data = await res.json();
+    }
     state.sessionId = data.session_id;
     state.fileType = data.file_type;
     state.filename = data.filename;
@@ -158,6 +183,10 @@ async function uploadFile(file) {
     state.currentPage = 0;
     state.pageMasks = {};
     state.detectedBoxes = [];
+    if (state.cleanedPdfBlobUrl) {
+      URL.revokeObjectURL(state.cleanedPdfBlobUrl);
+      state.cleanedPdfBlobUrl = null;
+    }
     removalModeSelect.value = 'auto';
 
     // Update Header
@@ -188,10 +217,15 @@ async function uploadFile(file) {
 async function loadPage(pageNum, autoDetectOnLoad = false) {
   showLoading('Rendering page...', `Loading page ${pageNum + 1}`);
   try {
-    const res = await fetch(`/api/page/${state.sessionId}/${pageNum}`);
-    if (!res.ok) throw new Error(await res.text());
-    const blob = await res.blob();
-    const objectUrl = URL.createObjectURL(blob);
+    let objectUrl;
+    if (state.useClientEngine) {
+      objectUrl = await window.EraseonClientEngine.getClientPageUrl(state.sessionId, pageNum);
+    } else {
+      const res = await fetch(`api/page/${state.sessionId}/${pageNum}`);
+      if (!res.ok) throw new Error(await res.text());
+      const blob = await res.blob();
+      objectUrl = URL.createObjectURL(blob);
+    }
 
     const img = new Image();
     img.onload = async () => {
@@ -528,20 +562,26 @@ async function autoDetectOnUpload() {
   showLoading('Auto-Detecting Watermarks...', 'Analyzing corner sparkles, badges, and overlays...');
 
   try {
-    const res = await fetch('/api/auto-detect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id: state.sessionId,
-        page_num: state.currentPage,
-        sensitivity: parseFloat(detectSensRange.value),
-        dilate_pixels: parseInt(dilateRange.value),
-        target_type: 'all'
-      })
-    });
+    let data;
+    if (state.useClientEngine) {
+      const imgData = imageCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
+      data = window.EraseonClientEngine.autoDetectClient(imgData, parseFloat(detectSensRange.value), 'all');
+    } else {
+      const res = await fetch('api/auto-detect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: state.sessionId,
+          page_num: state.currentPage,
+          sensitivity: parseFloat(detectSensRange.value),
+          dilate_pixels: parseInt(dilateRange.value),
+          target_type: 'all'
+        })
+      });
 
-    if (!res.ok) throw new Error(await res.text());
-    const data = await res.json();
+      if (!res.ok) throw new Error(await res.text());
+      data = await res.json();
+    }
     handleDetectionResults(data);
   } catch (err) {
     console.warn('Auto-detect error:', err);
@@ -567,20 +607,26 @@ async function runAutoDetect(targetType = 'all') {
   showLoading(promptText, 'Scanning candidate regions');
 
   try {
-    const res = await fetch('/api/auto-detect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id: state.sessionId,
-        page_num: state.currentPage,
-        sensitivity: parseFloat(detectSensRange.value),
-        dilate_pixels: parseInt(dilateRange.value),
-        target_type: targetType
-      })
-    });
+    let data;
+    if (state.useClientEngine) {
+      const imgData = imageCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
+      data = window.EraseonClientEngine.autoDetectClient(imgData, parseFloat(detectSensRange.value), targetType);
+    } else {
+      const res = await fetch('api/auto-detect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: state.sessionId,
+          page_num: state.currentPage,
+          sensitivity: parseFloat(detectSensRange.value),
+          dilate_pixels: parseInt(dilateRange.value),
+          target_type: targetType
+        })
+      });
 
-    if (!res.ok) throw new Error(await res.text());
-    const data = await res.json();
+      if (!res.ok) throw new Error(await res.text());
+      data = await res.json();
+    }
 
     if (data.detected_count === 0) {
       alert('No distinct watermark detected automatically for this preset. You can freely mark it with the Brush or Box tool!');
@@ -775,30 +821,51 @@ function setupProcessing() {
     hideDetectionBanner();
 
     const maskData = maskCanvas.toDataURL('image/png');
-    showLoading('Removing Watermark with AI...', 'Running Big-LaMa neural inpainting for photorealistic texture synthesis');
+    showLoading(
+      state.useClientEngine ? 'Removing Watermark...' : 'Removing Watermark with AI...',
+      state.useClientEngine
+        ? 'Running browser-side de-blending & content-aware restoration'
+        : 'Running Big-LaMa neural inpainting for photorealistic texture synthesis'
+    );
 
     try {
-      const payload = {
-        session_id: state.sessionId,
-        page_num: state.currentPage,
-        mask_b64: maskData,
-        mode: removalModeSelect.value,
-        alpha_hint: parseFloat(opacityRange.value),
-        watermark_color: colorHintSelect.value,
-        inpaint_radius: 5,
-        match_grain: true
-      };
+      if (state.useClientEngine) {
+        const srcData = imageCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
+        const mData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+        const cleaned = window.EraseonClientEngine.processImageDataClient(
+          srcData,
+          mData,
+          removalModeSelect.value,
+          colorHintSelect.value
+        );
+        const outCanvas = document.createElement('canvas');
+        outCanvas.width = cleaned.width;
+        outCanvas.height = cleaned.height;
+        outCanvas.getContext('2d').putImageData(cleaned, 0, 0);
+        state.cleanedImageSrc = outCanvas.toDataURL('image/png');
+      } else {
+        const payload = {
+          session_id: state.sessionId,
+          page_num: state.currentPage,
+          mask_b64: maskData,
+          mode: removalModeSelect.value,
+          alpha_hint: parseFloat(opacityRange.value),
+          watermark_color: colorHintSelect.value,
+          inpaint_radius: 5,
+          match_grain: true
+        };
 
-      const res = await fetch('/api/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+        const res = await fetch('api/process', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
 
-      if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) throw new Error(await res.text());
 
-      const data = await res.json();
-      state.cleanedImageSrc = data.cleaned_b64;
+        const data = await res.json();
+        state.cleanedImageSrc = data.cleaned_b64;
+      }
 
       // Update comparison stage
       imgCleaned.src = state.cleanedImageSrc;
@@ -839,33 +906,50 @@ function setupProcessing() {
         });
       }
 
-      const payload = {
-        session_id: state.sessionId,
-        template_mask_b64: templateMask,
-        page_masks: Object.keys(pageMasksPayload).length ? pageMasksPayload : null,
-        mode: removalModeSelect.value,
-        alpha_hint: parseFloat(opacityRange.value),
-        watermark_color: colorHintSelect.value,
-        inpaint_radius: 5,
-        dpi: 150
-      };
+      let downloadHref;
+      if (state.useClientEngine) {
+        const pdfBlob = await window.EraseonClientEngine.processAllPdfClient(
+          state.sessionId,
+          templateMask,
+          Object.keys(pageMasksPayload).length ? pageMasksPayload : null,
+          removalModeSelect.value,
+          colorHintSelect.value
+        );
+        if (state.cleanedPdfBlobUrl) URL.revokeObjectURL(state.cleanedPdfBlobUrl);
+        state.cleanedPdfBlobUrl = URL.createObjectURL(pdfBlob);
+        downloadHref = state.cleanedPdfBlobUrl;
+      } else {
+        const payload = {
+          session_id: state.sessionId,
+          template_mask_b64: templateMask,
+          page_masks: Object.keys(pageMasksPayload).length ? pageMasksPayload : null,
+          mode: removalModeSelect.value,
+          alpha_hint: parseFloat(opacityRange.value),
+          watermark_color: colorHintSelect.value,
+          inpaint_radius: 5,
+          dpi: 150
+        };
 
-      const res = await fetch('/api/process-all-pages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+        const res = await fetch('api/process-all-pages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
 
-      if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) throw new Error(await res.text());
 
-      const data = await res.json();
+        const data = await res.json();
+        downloadHref = data.download_url.replace(/^\//, '');
+      }
+
       btnDownload.disabled = false;
       downloadBtnText.textContent = 'Download Clean PDF';
 
       // Trigger download cleanly via temporary anchor so current page state stays intact
+      const baseName = (state.filename || 'document').replace(/\.[^.]+$/, '');
       const a = document.createElement('a');
-      a.href = data.download_url;
-      a.download = '';
+      a.href = downloadHref;
+      a.download = `clean_${baseName}.pdf`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -879,10 +963,30 @@ function setupProcessing() {
   // Download button
   btnDownload.addEventListener('click', () => {
     if (!state.sessionId) return;
+    if (state.useClientEngine) {
+      const baseName = (state.filename || 'eraseon').replace(/\.[^.]+$/, '');
+      const a = document.createElement('a');
+      if (state.fileType === 'pdf' && downloadBtnText.textContent.includes('PDF') && state.cleanedPdfBlobUrl) {
+        a.href = state.cleanedPdfBlobUrl;
+        a.download = `clean_${baseName}.pdf`;
+      } else if (state.cleanedImageSrc) {
+        a.href = state.cleanedImageSrc;
+        a.download = state.fileType === 'pdf'
+          ? `clean_${baseName}_page_${state.currentPage + 1}.png`
+          : `clean_${baseName}.png`;
+      } else {
+        return;
+      }
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      return;
+    }
+
     if (state.fileType === 'pdf' && downloadBtnText.textContent.includes('PDF')) {
-      window.location.href = `/api/download/${state.sessionId}?type=pdf`;
+      window.location.href = `api/download/${state.sessionId}?type=pdf`;
     } else {
-      window.location.href = `/api/download/${state.sessionId}?type=page&page_num=${state.currentPage}`;
+      window.location.href = `api/download/${state.sessionId}?type=page&page_num=${state.currentPage}`;
     }
   });
 }
