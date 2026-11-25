@@ -534,7 +534,7 @@
     // Subsample refinement points only during initial integer sweep if very large
     const fastRefStep = Math.max(1, Math.floor(fullPts.length / 450));
 
-    const evalNccBilinear = (rx, ry) => {
+    const evalNccBilinear = (rx, ry, minFrac = 0.45) => {
       let dot = 0, normI = 0, validCnt = 0;
       for (let k = 0; k < fullPts.length; k++) {
         const [tx, ty, tv] = fullPts[k];
@@ -545,7 +545,7 @@
         normI += iv * iv;
         validCnt++;
       }
-      if (validCnt < fullPts.length * 0.45 || normI < 1e-3) return -1;
+      if (validCnt < fullPts.length * minFrac || normI < 1e-3) return -1;
       return dot / (Math.sqrt(normI) * normFull);
     };
 
@@ -675,11 +675,11 @@
           for (let n = Math.floor(nMin); n <= Math.ceil(nMax); n++) {
             const gx = p0.px + m * v1.dx + n * v2.dx;
             const gy = p0.py + m * v1.dy + n * v2.dy;
-            if (gx < -sw * 0.38 || gx > w - sw * 0.62 || gy < -sh * 0.38 || gy > h - sh * 0.62) continue;
+            if (gx < -sw * 0.85 || gx > w - sw * 0.15 || gy < -sh * 0.85 || gy > h - sh * 0.15) continue;
             const already = peaks.some((pk) => Math.hypot(pk.px - gx, pk.py - gy) < Math.max(12, Math.min(sw, sh) * 0.35));
             if (already) continue;
-            const ncc = evalNccBilinear(gx, gy);
-            if (ncc >= 0.14) {
+            const ncc = evalNccBilinear(gx, gy, 0.15);
+            if (ncc >= 0.12) {
               peaks.push({ px: gx, py: gy, ncc, sw, sh });
             }
           }
@@ -1309,13 +1309,14 @@
       }
       if (ky >= 2) {
         const subY = ySamples.subarray(0, ky).slice().sort();
-        const ay = Math.max(-0.045, Math.min(0.48, subY[Math.floor(ky * 0.5)]));
-        alphaY[i] = Math.abs(ay) >= 0.015 ? ay : 0.0;
+        const rawMed = subY[Math.floor(ky * 0.5)];
+        const ay = rawMed > 0 ? Math.min(0.49, rawMed * 1.05) : Math.max(-0.045, rawMed);
+        alphaY[i] = Math.abs(ay) >= 0.009 ? ay : 0.0;
       }
       if (kc >= 2) {
         const subC = cSamples.subarray(0, kc).slice().sort();
-        const ac = Math.max(0.0, Math.min(0.45, subC[Math.floor(kc * 0.5)]));
-        alphaC[i] = ac >= 0.015 ? ac : 0.0;
+        const ac = Math.max(0.0, Math.min(0.46, subC[Math.floor(kc * 0.5)] * 1.05));
+        alphaC[i] = ac >= 0.010 ? ac : 0.0;
       }
     }
 
@@ -1409,10 +1410,10 @@
       const ay = globalAY[i];
       if (ay === 0) continue;
       const bgStd = Math.sqrt(Math.max(0, b2[i] - b1[i] * b1[i]));
-      if (bgStd < 5.2 && Math.abs(ay) >= 0.020) {
+      if (bgStd < 5.5 && Math.abs(ay) >= 0.012) {
         smoothHole[i] = 1;
         hasSmooth = true;
-      } else if (ay > 0.14 && bgStd >= 5.2) {
+      } else if (ay > 0.14 && bgStd >= 5.5) {
         const p = i * 4;
         const d = Math.max(
           Math.abs(out[p] - med3[p]),
@@ -1471,7 +1472,7 @@
     for (let i = 0; i < len; i++) {
       if (!binMask[i]) continue;
       const dev = isLight ? (ySrc[i] - open3[i]) : (close3[i] - ySrc[i]);
-      if (dev >= 5.0) {
+      if (dev >= 3.2) {
         strokeMask[i] = 1;
         strokeCnt++;
       }
@@ -1521,7 +1522,7 @@
       out[p + 2] = clamp255(yRec + 1.772 * (cbRec - 128.0));
 
       const bgStd = Math.sqrt(Math.max(0, m2[i] - m1[i] * m1[i]));
-      if (a > 0.045 && bgStd < 5.0) {
+      if (a > 0.025 && bgStd < 5.5) {
         smoothHole[i] = 1;
         hasSmooth = true;
       }
