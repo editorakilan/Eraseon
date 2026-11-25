@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Eraseon - Remove. Restore. Reveal.</title>
+  <link rel="icon" type="image/png" href="/static/eraseon-icon.png">
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body class="dark-theme">
+  <!-- Top Navigation Header -->
+  <header class="app-header">
+    <div class="brand">
+      <div class="logo-icon">
+        <img src="/static/eraseon-icon.png" alt="Eraseon Logo" class="brand-logo-img">
+      </div>
+      <div>
+        <h1>Eraseon <span class="badge-pro">PRO</span></h1>
+        <p class="subtitle">Remove. Restore. Reveal. — AI Inpainting & Zero-Blur De-blending for Images & PDFs</p>
+      </div>
+    </div>
+    
+    <div class="header-actions">
+      <label for="fileUploadInput" class="btn btn-upload">
+        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+        <span>Open Image / PDF</span>
+      </label>
+      <input type="file" id="fileUploadInput" accept="image/*,application/pdf" style="display: none;">
+      
+      <div id="fileMetaBadge" class="file-badge hidden">
+        <span id="fileNameDisplay">document.pdf</span>
+        <span id="fileTypeBadge" class="tag">PDF</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Workspace Layout -->
+  <main class="main-layout">
+    <!-- Left Sidebar: Controls & Tools -->
+    <aside class="sidebar-panel">
+      <!-- Section 1: Watermark Selection Tools -->
+      <div class="panel-section">
+        <h3 class="section-title">
+          <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/></svg>
+          Selection Mode
+        </h3>
+        <div class="tool-grid">
+          <button id="toolBrush" class="tool-btn active" title="Freehand Brush">
+            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.874a2 2 0 0 1 .506-.852z"/></svg>
+            <span>Brush</span>
+          </button>
+          <button id="toolRect" class="tool-btn" title="Rectangle Box">
+            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>
+            <span>Box</span>
+          </button>
+          <button id="toolEraser" class="tool-btn" title="Eraser">
+            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg>
+            <span>Eraser</span>
+          </button>
+          <button id="toolClear" class="tool-btn danger" title="Clear Mask">
+            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            <span>Clear</span>
+          </button>
+        </div>
+
+        <div class="control-row">
+          <label>Brush Size: <span id="brushSizeVal">28px</span></label>
+          <input type="range" id="brushSizeRange" min="4" max="120" value="28">
+        </div>
+      </div>
+
+      <!-- Section 2: AI Auto-Detection -->
+      <div class="panel-section">
+        <h3 class="section-title">
+          <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          Smart Auto-Detect & Presets
+        </h3>
+        <p class="section-desc">One-click detection for AI watermarks, badges, stamps & text.</p>
+        
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <button id="btnDetectTranslucentGrid" class="btn btn-secondary w-full" style="background: rgba(16, 185, 129, 0.2); border-color: rgba(16, 185, 129, 0.4); color: #a7f3d0;">
+            <span>🔍 Translucent Grid & Stock Text</span>
+          </button>
+
+          <button id="btnDetectSparkles" class="btn btn-secondary w-full" style="background: rgba(168, 85, 247, 0.2); border-color: rgba(168, 85, 247, 0.4); color: #e9d5ff;">
+            <span>✨ AI Sparkles / Corner Star Logo</span>
+          </button>
+          
+          <button id="btnDetectLetterbox" class="btn btn-secondary w-full" style="background: rgba(59, 130, 246, 0.2); border-color: rgba(59, 130, 246, 0.4); color: #bfdbfe;">
+            <span>🏷️ Letterbox & Container Badges</span>
+          </button>
+
+          <button id="btnAutoDetect" class="btn btn-secondary w-full">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <span>⚡ Auto-Detect All Overlays</span>
+          </button>
+        </div>
+
+        <div class="control-row mt-2">
+          <label>Sensitivity: <span id="detectSensVal">Medium</span></label>
+          <input type="range" id="detectSensRange" min="0.1" max="0.9" step="0.1" value="0.5">
+        </div>
+        <div class="control-row">
+          <label>Edge Expansion: <span id="dilateVal">4px</span></label>
+          <input type="range" id="dilateRange" min="0" max="12" value="4">
+        </div>
+
+        <!-- Detected Watermark Boxes List -->
+        <div id="detectedItemsSection" class="detected-boxes-panel hidden mt-3">
+          <div class="boxes-header">
+            <span id="detectedBoxesCountBadge" class="tag">0 detected</span>
+            <button id="btnClearDetectedBoxes" class="btn-link">Clear</button>
+          </div>
+          <div id="detectedBoxesList" class="detected-boxes-list"></div>
+        </div>
+      </div>
+
+      <!-- Section 3: Restoration Algorithm & Opacity Handling -->
+      <div class="panel-section">
+        <h3 class="section-title">
+          <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/></svg>
+          Removal Algorithm
+        </h3>
+
+        <div class="control-row">
+          <label for="removalModeSelect">Method:</label>
+          <select id="removalModeSelect" class="form-select">
+            <option value="auto" selected>🚀 AI Deep Inpaint (Big-LaMa - Logos, Stars & Badges)</option>
+            <option value="deblend">🔍 Pure Inverse Alpha (Zero-Blur for Translucent / Grid Text & Waves)</option>
+            <option value="inpaint_telea">🎨 Content-Aware Patch (Telea FMM)</option>
+            <option value="inpaint_ns">🌊 Navier-Stokes PDE (Smooth Gradients)</option>
+          </select>
+        </div>
+
+        <div class="control-row">
+          <label>Watermark Opacity Hint: <span id="opacityVal">50%</span></label>
+          <input type="range" id="opacityRange" min="0.1" max="0.9" step="0.05" value="0.5">
+          <small class="hint-text">Adjust to recover exact background under translucent stamps</small>
+        </div>
+
+        <div class="control-row">
+          <label for="colorHintSelect">Watermark Color:</label>
+          <select id="colorHintSelect" class="form-select">
+            <option value="auto" selected>⚡ Auto-detect tone</option>
+            <option value="#ffffff">⚪ Light / White (#FFFFFF)</option>
+            <option value="#000000">⚫ Dark / Black (#000000)</option>
+            <option value="#888888">🔘 Gray / Neutral (#888888)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Section 4: PDF & Batch Actions -->
+      <div id="pdfControlsSection" class="panel-section hidden">
+        <h3 class="section-title">
+          <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          PDF Batch Processing
+        </h3>
+        <label class="checkbox-container">
+          <input type="checkbox" id="checkApplyAllPages" checked>
+          <span class="checkmark"></span>
+          <span>Apply mask template to all pages</span>
+        </label>
+        
+        <button id="btnProcessAllPages" class="btn btn-accent w-full mt-2">
+          <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          <span>Batch Clean Entire PDF</span>
+        </button>
+      </div>
+
+      <!-- Primary Action Buttons -->
+      <div class="action-footer">
+        <button id="btnProcessPage" class="btn btn-primary w-full">
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/><path d="m9 11 3 3L22 4"/></svg>
+          <span>Remove Watermark</span>
+        </button>
+        
+        <button id="btnDownload" class="btn btn-success w-full mt-2" disabled>
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+          <span id="downloadBtnText">Download Result</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Center Workspace / Canvas Viewer -->
+    <section class="workspace-area">
+      <!-- Top Workspace Toolbar: Pagination, Zoom, Split View Toggle -->
+      <div class="workspace-toolbar">
+        <div id="pdfPagination" class="pagination-controls hidden">
+          <button id="btnPrevPage" class="btn-icon" title="Previous Page">◀</button>
+          <span id="pageIndicator">Page 1 of 1</span>
+          <button id="btnNextPage" class="btn-icon" title="Next Page">▶</button>
+        </div>
+
+        <div class="view-toggles">
+          <button id="btnViewEditor" class="tab-btn active">✏️ Editor & Mask</button>
+          <button id="btnViewComparison" class="tab-btn" disabled>↔️ Before / After Split</button>
+        </div>
+
+        <div class="zoom-controls">
+          <button id="btnZoomOut" class="btn-icon" title="Zoom Out">−</button>
+          <span id="zoomLevel">100%</span>
+          <button id="btnZoomIn" class="btn-icon" title="Zoom In">+</button>
+          <button id="btnFitScreen" class="btn-icon" title="Fit to Screen">⛶</button>
+        </div>
+      </div>
+
+      <!-- Canvas Container -->
+      <div class="canvas-viewport" id="canvasViewport">
+        <!-- Floating Auto-Detection Banner (Only Detection as Box, Proceed Option) -->
+        <div id="detectionBanner" class="detection-banner hidden">
+          <div class="detection-banner-info">
+            <span class="pulse-indicator"></span>
+            <div>
+              <strong id="detectionTitle">Watermarks Detected!</strong>
+              <p id="detectionDesc">2 watermark boxes highlighted on the image. Proceed with AI removal?</p>
+            </div>
+          </div>
+          <div class="detection-banner-actions">
+            <button id="btnProceedRemoval" class="btn btn-accent btn-sm">
+              <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              <span>Proceed to Remove</span>
+            </button>
+            <button id="btnDismissBoxes" class="btn btn-secondary btn-sm" title="Dismiss detection">
+              <span>✕ Dismiss</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Empty / Welcome State -->
+        <div id="dropZonePrompt" class="dropzone-empty">
+          <div class="dropzone-box">
+            <svg width="64" height="64" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+              <path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+            </svg>
+            <h2>Drag & Drop your Image or PDF here</h2>
+            <p>Supports PNG, JPG, JPEG, WEBP, BMP, and multi-page PDFs</p>
+            <button class="btn btn-primary mt-3" onclick="document.getElementById('fileUploadInput').click()">Browse Files</button>
+            <div class="feature-pills">
+              <span>⚡ Rotated & diagonal text detection</span>
+              <span>🔍 Translucent watermark recovery</span>
+              <span>🎨 Zero-artifact inpainting</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Interactive Canvas Stage (Editor Mode) -->
+        <div id="canvasStage" class="canvas-stage hidden">
+          <canvas id="imageCanvas"></canvas>
+          <canvas id="maskCanvas"></canvas>
+          <canvas id="overlayCanvas"></canvas>
+          <div id="brushCursor" class="brush-cursor"></div>
+        </div>
+
+        <!-- Interactive Split Slider View (Comparison Mode) -->
+        <div id="comparisonStage" class="comparison-stage hidden">
+          <div class="split-container" id="splitContainer">
+            <!-- Background: Original with Watermark -->
+            <img id="imgOriginal" class="split-image" alt="Original">
+            <!-- Foreground: Cleaned Result (Clipped) -->
+            <div class="split-overlay" id="splitOverlay">
+              <img id="imgCleaned" class="split-image" alt="Cleaned">
+            </div>
+            <!-- Draggable Split Divider Line -->
+            <div class="split-handle" id="splitHandle">
+              <div class="handle-bar"></div>
+              <div class="handle-circle">↔</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Processing Loading Overlay -->
+        <div id="loadingOverlay" class="loading-overlay hidden">
+          <div class="spinner"></div>
+          <h3 id="loadingText">Removing Watermark...</h3>
+          <p id="loadingSubtext">Applying inverse alpha restoration & content-aware inpainting</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

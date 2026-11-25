@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Runtime session uploads and outputs
+uploads/
+outputs/
+
+# Large model weights (>100MB GitHub limit - loaded from HuggingFace cache or placed locally)
+backend/models/*.pt
+backend/models/*.pth
+backend/models/*.onnx
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
