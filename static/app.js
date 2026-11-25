@@ -847,7 +847,8 @@ function setupProcessing() {
           mData,
           removalModeSelect.value,
           colorHintSelect.value,
-          parseFloat(opacityRange.value)
+          parseFloat(opacityRange.value),
+          state.detectedBoxes
         );
         const outCanvas = document.createElement('canvas');
         outCanvas.width = cleaned.width;
