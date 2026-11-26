@@ -36,8 +36,6 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: '_site'
-      - name: Wait for branch build lock to clear
-        run: sleep 25
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

@@ -567,6 +567,7 @@ async function autoDetectOnUpload() {
   try {
     let data;
     if (state.useClientEngine) {
+      await waitForPaint();
       const imgData = imgCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
       data = window.EraseonClientEngine.autoDetectClient(
         imgData,
@@ -617,6 +618,7 @@ async function runAutoDetect(targetType = 'all') {
   try {
     let data;
     if (state.useClientEngine) {
+      await waitForPaint();
       const imgData = imgCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
       data = window.EraseonClientEngine.autoDetectClient(
         imgData,
@@ -837,12 +839,13 @@ function setupProcessing() {
     showLoading(
       state.useClientEngine ? 'Removing Watermark...' : 'Removing Watermark with AI...',
       state.useClientEngine
-        ? 'Running browser-side de-blending & content-aware restoration'
+        ? 'Running browser-side de-blending, multi-scale inpainting & enhancement'
         : 'Running Big-LaMa neural inpainting for photorealistic texture synthesis'
     );
 
     try {
       if (state.useClientEngine) {
+        await waitForPaint();
         const srcData = imgCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
         const mData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
         const cleaned = window.EraseonClientEngine.processImageDataClient(
@@ -923,6 +926,7 @@ function setupProcessing() {
 
       let downloadHref;
       if (state.useClientEngine) {
+        await waitForPaint();
         const pdfBlob = await window.EraseonClientEngine.processAllPdfClient(
           state.sessionId,
           templateMask,
@@ -1137,6 +1141,10 @@ function fitToScreen() {
 }
 
 // Loading UI helpers
+function waitForPaint() {
+  return new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 16)));
+}
+
 function showLoading(title, subtitle = '') {
   loadingText.textContent = title;
   loadingSubtext.textContent = subtitle;
