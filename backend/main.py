@@ -225,11 +225,12 @@ class ProcessPageRequest(BaseModel):
     session_id: str
     page_num: int = 0
     mask_b64: str  # Base64 data URL of user mask
-    mode: str = "auto"  # auto, deblend, inpaint_telea, inpaint_ns
+    mode: str = "auto"  # auto, logo, grid, sparkles, letterbox, text, inpaint_telea, inpaint_ns
     alpha_hint: float = 0.5
     watermark_color: Optional[str] = "auto"
     inpaint_radius: int = 5
     match_grain: bool = True
+    boxes_hint: Optional[List[Dict[str, Any]]] = None
 
 
 @app.post("/api/process")
@@ -289,7 +290,7 @@ async def process_page(req: ProcessPageRequest):
     # Parse color
     wm_color = parse_color_hex(req.watermark_color)
 
-    # Run hybrid removal
+    # Run isolated module removal
     cleaned = hybrid_watermark_removal(
         img=img_bgr,
         mask=binary_mask,
@@ -297,7 +298,8 @@ async def process_page(req: ProcessPageRequest):
         alpha_hint=req.alpha_hint,
         watermark_color=wm_color,
         inpaint_radius=req.inpaint_radius,
-        match_grain=req.match_grain
+        match_grain=req.match_grain,
+        boxes_hint=req.boxes_hint
     )
 
     out_file = os.path.join(o_dir, f"cleaned_page_{req.page_num}.png")

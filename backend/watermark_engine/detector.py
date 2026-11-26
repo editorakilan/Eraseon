@@ -148,57 +148,75 @@ def detect_ai_corner_sparkles(img: np.ndarray, sensitivity: float = 0.5) -> Tupl
     """
     Detects AI watermark sparkles and star logos (e.g. Google Gemini / Imagen / SynthID 
     4-pointed diamond stars) placed in the bottom-right corner.
-    Uses multi-scale tophat local contrast and luminance thresholding.
+    Uses resolution-adaptive scale bounds, letterbox trimming, and luminance peak filtering.
     """
     h, w = img.shape[:2]
     mask = np.zeros((h, w), dtype=np.uint8)
     boxes = []
 
-    # Standard placement for AI generation stars (SynthID / Gemini / Imagen) is bottom-right
-    corners = [
-        ("bottom_right", int(h * 0.60), h, int(w * 0.68), w)
-    ]
+    y1 = int(h * 0.72)
+    y2 = h
+    gray_full = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+    # Trim bottom dark letterbox rows so stars don't merge into letterbox contrast edge
+    while y2 > y1 + 32:
+        if float(np.mean(gray_full[y2 - 1, :])) < 48.0:
+            y2 -= 1
+        else:
+            break
+    x1 = int(w * 0.76)
+    x2 = w
+    corners = [("bottom_right", y1, y2, x1, x2)]
 
-    for corner_name, y1, y2, x1, x2 in corners:
-        crop = img[y1:y2, x1:x2]
+    min_dim = min(h, w)
+    min_sz = max(12, int(min_dim * 0.015))
+    max_sz = max(65, int(min_dim * 0.14))
+    min_area = max(40, int(min_sz * min_sz * 0.25))
+    max_area = int(max_sz * max_sz * 0.85)
+
+    for corner_name, cy1, cy2, cx1, cx2 in corners:
+        crop = img[cy1:cy2, cx1:cx2]
         ch, cw = crop.shape[:2]
         if ch < 30 or cw < 30:
             continue
 
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        # Skip white-paper PDF margins
         if float(np.median(gray)) > 235.0:
             continue
 
-        k = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 35))
+        k_sz = max(25, int(min_dim * 0.05) | 1)
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (k_sz, k_sz))
         th = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k)
-        thresh_th_val = max(14, int(20 - sensitivity * 10))
+        thresh_th_val = max(14, int(22 - sensitivity * 10))
         _, th_thresh = cv2.threshold(th, thresh_th_val, 255, cv2.THRESH_BINARY)
         _, th_sharp = cv2.threshold(th, max(24, thresh_th_val + 12), 255, cv2.THRESH_BINARY)
 
-        thresh_br_val = max(150, int(180 - sensitivity * 30))
-        _, br_thresh = cv2.threshold(gray, thresh_br_val, 255, cv2.THRESH_BINARY)
+        # Difference-of-Gaussians isolates stars cleanly even on bright concrete/sidewalk bands
+        bg_g = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), max(12.0, min_dim * 0.015))
+        dog = np.clip(gray.astype(np.float32) - bg_g, 0, 255).astype(np.uint8)
+        _, dog_thresh = cv2.threshold(dog, max(14, thresh_th_val), 255, cv2.THRESH_BINARY)
 
         clean_th = cv2.morphologyEx(th_thresh, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
         clean_th_sharp = cv2.morphologyEx(th_sharp, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-        clean_br = cv2.morphologyEx(br_thresh, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+        clean_dog = cv2.morphologyEx(dog_thresh, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
 
-        for m_cand in [clean_th, clean_th_sharp, clean_br]:
+        for m_cand in [clean_th, clean_th_sharp, clean_dog]:
             contours, _ = cv2.findContours(m_cand, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for c in contours:
                 area = cv2.contourArea(c)
                 bx, by, bw, bh = cv2.boundingRect(c)
                 aspect = bw / float(bh) if bh > 0 else 0
+                fill = area / float(max(1, bw * bh))
 
-                # SynthID / AI diamond stars are compact and near-symmetric
-                if 12 <= bw <= 55 and 12 <= bh <= 55 and 0.75 <= aspect <= 1.35 and 40 <= area <= 1800:
+                # 4-pointed diamond star: compact, near-square, moderate fill (~0.20-0.72), bright neutral peak
+                if min_sz <= bw <= max_sz and min_sz <= bh <= max_sz and 0.72 <= aspect <= 1.38 and min_area <= area <= max_area and 0.20 <= fill <= 0.72:
                     sc = crop[by:by + bh, bx:bx + bw]
-                    b, g, r = sc[:, :, 0], sc[:, :, 1], sc[:, :, 2]
-                    color_diff = np.mean(np.abs(b.astype(int) - g.astype(int)) + np.abs(g.astype(int) - r.astype(int)))
-                    if color_diff < 55:
-                        gx = x1 + bx
-                        gy = y1 + by
-                        pad = 4
+                    b_c, g_c, r_c = sc[:, :, 0], sc[:, :, 1], sc[:, :, 2]
+                    color_diff = np.mean(np.abs(b_c.astype(int) - g_c.astype(int)) + np.abs(g_c.astype(int) - r_c.astype(int)))
+                    max_bright = float(np.max(gray[by:by + bh, bx:bx + bw]))
+                    if color_diff < 45 and max_bright >= 145.0:
+                        gx = cx1 + bx
+                        gy = cy1 + by
+                        pad = max(5, int(min_dim * 0.005))
                         px = max(0, gx - pad)
                         py = max(0, gy - pad)
                         pw = min(w - px, bw + pad * 2)
@@ -218,7 +236,7 @@ def detect_ai_corner_sparkles(img: np.ndarray, sensitivity: float = 0.5) -> Tupl
 
 def detect_letterbox_overlays(img: np.ndarray) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
     """
-    Detects letterbox black bars and overlay tags in or near margins.
+    Detects letterbox black bars and dark container aspect-ratio overlay badges/pills.
     """
     h, w = img.shape[:2]
     mask = np.zeros((h, w), dtype=np.uint8)
@@ -232,13 +250,15 @@ def detect_letterbox_overlays(img: np.ndarray) -> Tuple[np.ndarray, List[Dict[st
     for r in range(int(h * 0.15)):
         if row_means[r] < 35:
             top_bar_h = r + 1
+        elif top_bar_h > 0:
+            break
     if top_bar_h > 5:
-        cv2.rectangle(mask, (0, 0), (w, top_bar_h + 3), 255, -1)
+        cv2.rectangle(mask, (0, 0), (w, top_bar_h + 6), 255, -1)
         boxes.append({
             "x": 0,
             "y": 0,
             "width": int(w),
-            "height": int(top_bar_h + 3),
+            "height": int(top_bar_h + 6),
             "type": "letterbox_bar",
             "label": "Top Letterbox Bar"
         })
@@ -248,16 +268,47 @@ def detect_letterbox_overlays(img: np.ndarray) -> Tuple[np.ndarray, List[Dict[st
     for r in range(h - 1, int(h * 0.85), -1):
         if row_means[r] < 35:
             bot_bar_h = h - r
+        elif bot_bar_h > 0:
+            break
     if bot_bar_h > 5:
-        cv2.rectangle(mask, (0, h - bot_bar_h - 3), (w, h), 255, -1)
+        cv2.rectangle(mask, (0, h - bot_bar_h - 6), (w, h), 255, -1)
         boxes.append({
             "x": 0,
-            "y": int(h - bot_bar_h - 3),
+            "y": int(h - bot_bar_h - 6),
             "width": int(w),
-            "height": int(bot_bar_h + 3),
+            "height": int(bot_bar_h + 6),
             "type": "letterbox_bar",
             "label": "Bottom Letterbox Bar"
         })
+
+    # 3. Dark Rounded Container Badges / Pills (e.g. "EPIQ 1.89:1 container | 2.00:1 presentation")
+    y_start = max(top_bar_h + 2, int(h * 0.01))
+    y_end = int(h * 0.32)
+    x_end = int(w * 0.58)
+    if y_end > y_start + 16 and x_end > 60:
+        roi = gray[y_start:y_end, 0:x_end]
+        pill_bin = (roi < 95).astype(np.uint8) * 255
+        pill_bin = cv2.morphologyEx(pill_bin, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 3)))
+        contours, _ = cv2.findContours(pill_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for c in contours:
+            bx, by, bw, bh = cv2.boundingRect(c)
+            area = cv2.contourArea(c)
+            aspect = bw / float(max(1, bh))
+            fill = area / float(max(1, bw * bh))
+            if bw >= max(60, int(w * 0.06)) and bw <= int(w * 0.52) and bh >= 16 and bh <= max(72, int(h * 0.08)) and aspect >= 2.2 and fill >= 0.55:
+                px = max(0, bx - 8)
+                py = max(0, y_start + by - 8)
+                pw = min(w - px, bw + 16)
+                ph = min(h - py, bh + 16)
+                cv2.rectangle(mask, (px, py), (px + pw, py + ph), 255, -1)
+                boxes.append({
+                    "x": int(px),
+                    "y": int(py),
+                    "width": int(pw),
+                    "height": int(ph),
+                    "type": "container_badge",
+                    "label": "Aspect Ratio Badge"
+                })
 
     return mask, boxes
 
@@ -570,7 +621,16 @@ def auto_detect_watermark(
             y2 = min(h, b["y"] + b["height"] + pad)
             cv2.rectangle(box_mask, (x1, y1), (x2, y2), 255, -1)
 
-    recommended_mode = "deblend" if has_translucent_grid else "auto"
+    has_lb = any(b.get("type") in ("letterbox_bar", "container_badge") for b in final_boxes)
+    has_sp = any(b.get("type") == "ai_sparkles" for b in final_boxes)
+    if has_translucent_grid:
+        recommended_mode = "grid"
+    elif has_lb and not has_sp:
+        recommended_mode = "letterbox"
+    elif has_sp and not has_lb:
+        recommended_mode = "sparkles"
+    else:
+        recommended_mode = "auto"
 
     return {
         "mask": box_mask,

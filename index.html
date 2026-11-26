@@ -118,20 +118,24 @@
         </div>
       </div>
 
-      <!-- Section 3: Restoration Algorithm & Opacity Handling -->
+      <!-- Section 3: Operation Module & Restoration Options -->
       <div class="panel-section">
         <h3 class="section-title">
           <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/></svg>
-          Removal Algorithm
+          Operation Module Type
         </h3>
 
         <div class="control-row">
-          <label for="removalModeSelect">Method:</label>
+          <label for="removalModeSelect">Module Type:</label>
           <select id="removalModeSelect" class="form-select">
-            <option value="auto" selected>🚀 AI Deep Inpaint (Big-LaMa - Logos, Stars & Badges)</option>
-            <option value="deblend">🔍 Pure Inverse Alpha (Zero-Blur for Translucent / Grid Text & Waves)</option>
-            <option value="inpaint_telea">🎨 Content-Aware Patch (Telea FMM)</option>
-            <option value="inpaint_ns">🌊 Navier-Stokes PDE (Smooth Gradients)</option>
+            <option value="auto" selected>⚡ Smart Auto-Router (Auto-Selects Module)</option>
+            <option value="logo">🖼️ Logo Type (Solid Logos, Badges &amp; Objects — Zero-Mosaic)</option>
+            <option value="grid">🔍 Grid Type (Translucent Repeating Text &amp; Stock Grids)</option>
+            <option value="sparkles">✨ Sparkles Type (AI Corner Stars — Gemini / SynthID)</option>
+            <option value="letterbox">🎬 Letterbox Type (Black Bars &amp; Aspect Badges)</option>
+            <option value="text">✍️ Text Type (Single Translucent Stamp / Signature)</option>
+            <option value="inpaint_telea">🎨 Classical Patch (Telea FMM)</option>
+            <option value="inpaint_ns">🌊 Smooth Gradient (Navier-Stokes PDE)</option>
           </select>
         </div>
 
@@ -281,6 +285,14 @@
     </section>
   </main>
 
+  <script src="static/modules/common.js"></script>
+  <script src="static/modules/ai_inpaint_module.js"></script>
+  <script src="static/modules/logo_module.js"></script>
+  <script src="static/modules/sparkles_module.js"></script>
+  <script src="static/modules/letterbox_module.js"></script>
+  <script src="static/modules/text_module.js"></script>
+  <script src="static/modules/grid_module.js"></script>
+  <script src="static/modules/inpaint_module.js"></script>
   <script src="static/client_engine.js"></script>
   <script src="static/app.js"></script>
 </body>

@@ -664,26 +664,35 @@ function handleDetectionResults(data) {
     // 1. Render bounding boxes on mask canvas
     renderBoxesOnMask(state.detectedBoxes);
 
-    // 2. Set recommended mode automatically based on watermark type
+    // 2. Set recommended module automatically based on detected watermark type
     if (data.recommended_mode) {
-      removalModeSelect.value = data.recommended_mode;
+      const modeMap = { deblend: 'grid', lama: 'logo', ai_sparkles: 'sparkles' };
+      const mapped = modeMap[data.recommended_mode] || data.recommended_mode;
+      if ([...removalModeSelect.options].some(o => o.value === mapped)) {
+        removalModeSelect.value = mapped;
+      }
     }
 
     // 3. Display floating banner with user option to proceed
     if (detectionBanner) {
       detectionBanner.classList.remove('hidden');
+      const activeMode = removalModeSelect.value;
       if (detectionTitle) {
-        if (data.recommended_mode === 'deblend') {
-          detectionTitle.textContent = `${count} Translucent Watermark${count > 1 ? 's' : ''} Detected!`;
+        if (activeMode === 'grid') {
+          detectionTitle.textContent = `${count} Translucent Grid Watermark${count > 1 ? 's' : ''} Detected!`;
         } else {
           detectionTitle.textContent = `${count} Watermark${count > 1 ? 's' : ''} Detected!`;
         }
       }
       if (detectionDesc) {
-        if (data.recommended_mode === 'deblend') {
-          detectionDesc.textContent = `Zero-Blur Inverse Alpha activated: preserves 100% of wave textures, reflections & gradients without blur. Click "Proceed to Remove".`;
+        if (activeMode === 'grid') {
+          detectionDesc.textContent = `Grid Module activated: Zero-Blur Dekel 2D Lattice recovery preserves textures & gradients. Click "Proceed to Remove".`;
+        } else if (activeMode === 'letterbox') {
+          detectionDesc.textContent = `Letterbox Module activated: Clean edge continuation & badge removal ready. Click "Proceed to Remove".`;
+        } else if (activeMode === 'sparkles') {
+          detectionDesc.textContent = `Sparkles Module activated: Corner star regions highlighted. Click "Proceed to Remove".`;
         } else {
-          detectionDesc.textContent = `Watermark regions highlighted as boxes below. Click "Proceed to Remove" to clean them with AI.`;
+          detectionDesc.textContent = `Watermark regions highlighted as boxes below. Click "Proceed to Remove" to clean them.`;
         }
       }
     }
@@ -848,13 +857,14 @@ function setupProcessing() {
         await waitForPaint();
         const srcData = imgCtx.getImageData(0, 0, imageCanvas.width, imageCanvas.height);
         const mData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
-        const cleaned = window.EraseonClientEngine.processImageDataClient(
+        const cleaned = await window.EraseonClientEngine.processImageDataClient(
           srcData,
           mData,
           removalModeSelect.value,
           colorHintSelect.value,
           parseFloat(opacityRange.value),
-          state.detectedBoxes
+          state.detectedBoxes,
+          (title, subtitle) => showLoading(title, subtitle)
         );
         const outCanvas = document.createElement('canvas');
         outCanvas.width = cleaned.width;
@@ -870,7 +880,8 @@ function setupProcessing() {
           alpha_hint: parseFloat(opacityRange.value),
           watermark_color: colorHintSelect.value,
           inpaint_radius: 5,
-          match_grain: true
+          match_grain: true,
+          boxes_hint: state.detectedBoxes && state.detectedBoxes.length ? state.detectedBoxes : null
         };
 
         const res = await fetch('api/process', {
